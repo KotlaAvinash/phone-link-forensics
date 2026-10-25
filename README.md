@@ -1,6 +1,6 @@
 # Phone Link forensics
 
-[![tests](https://github.com/whitedevil1026/phone-link-forensics/actions/workflows/tests.yml/badge.svg)](https://github.com/whitedevil1026/phone-link-forensics/actions/workflows/tests.yml)
+[![tests](https://github.com/KotlaAvinash/phone-link-forensics/actions/workflows/tests.yml/badge.svg)](https://github.com/KotlaAvinash/phone-link-forensics/actions/workflows/tests.yml)
 
 Forensic tooling for **Microsoft Phone Link** (formerly *Your Phone*), the Windows app that mirrors an Android phone's messages, calls, photos, notifications and apps onto a PC. It also covers the other ways a phone leaves traces on a PC: **USB cable** and **Bluetooth**.
 
@@ -354,7 +354,7 @@ See [docs/TESTING.md](docs/TESTING.md) for how the maps were tested.
 
 ## Related
 
-Capability Access Manager (camera, microphone and location usage) maps are a separate tool: [sqlecmd-maps-capabilityaccessmanager](https://github.com/whitedevil1026/sqlecmd-maps-capabilityaccessmanager).
+Capability Access Manager (camera, microphone and location usage) maps are a separate tool: [sqlecmd-maps-capabilityaccessmanager](https://github.com/KotlaAvinash/sqlecmd-maps-capabilityaccessmanager).
 
 ## Credits
 
