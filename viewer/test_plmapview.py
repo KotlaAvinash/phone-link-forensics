@@ -606,6 +606,140 @@ class LinkedPhonesFailureTest(unittest.TestCase):
                 tempfile.tempdir = old_tempdir
 
 
+class OpenFolderSourcesTest(unittest.TestCase):
+    """Open folder... must re-decide the package-level views (LocalCache) and the live this-PC views for the NEW
+    input, and commit them only when the new input loads."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.apps = []
+
+    def tearDown(self):
+        for a in self.apps:
+            try:
+                a.on_close(warn=False)
+            except Exception:
+                pass
+        self.tmp.cleanup()
+
+    def make(self, devices, **kw):
+        app = V.Viewer(devices, **kw)
+        app.withdraw()
+        app.update()
+        self.apps.append(app)
+        return app
+
+    def package(self, name, phone):
+        """A synthetic package whose one linked phone is called `phone`. Returns (package root, LocalCache)."""
+        root = pldemo.build_package(os.path.join(self.tmp.name, name))
+        lc = V.D.find_localcache(root)
+        meta = os.path.join(lc, "DeviceMetadataStorage.json")
+        with open(meta, encoding="utf-8") as f:
+            text = f.read()
+        with open(meta, "w", encoding="utf-8") as f:
+            f.write(text.replace("Example Phone", phone))
+        return root, lc
+
+    def open(self, app, folder):
+        with mock.patch.object(V.filedialog, "askdirectory", return_value=folder), \
+                mock.patch.object(V.messagebox, "showerror") as err:
+            app.open_folder()
+        return err
+
+    def phones(self, app):
+        return {r.get("DisplayName") for r in app.g.views["PC_phones"].rows if r.get("DisplayName")}
+
+    def test_opening_a_second_package_shows_its_own_linked_phones(self):
+        root_a, lc_a = self.package("case-a", "CASE A PHONE")
+        root_b, lc_b = self.package("case-b", "CASE B PHONE")
+        app = self.make(V.P.find_device_dirs(root_a), localcache=lc_a)
+        self.assertEqual(self.phones(app), {"CASE A PHONE"})
+        old_pc_work = app.pc.work
+        err = self.open(app, root_b)
+        self.assertEqual(err.call_count, 0)
+        self.assertEqual(self.phones(app), {"CASE B PHONE"})
+        copies = app.g.views["PC_copies"].basis
+        self.assertIn(lc_b, copies)
+        self.assertNotIn(lc_a, copies)
+        self.assertEqual(app.localcache, lc_b)
+        self.assertIn(root_b, app.src_full)
+        self.assertNotIn(root_a, app.src_full)
+        self.assertFalse(os.path.exists(old_pc_work), "case A's package copy must be released")
+
+    def test_opening_a_package_after_a_bare_device_folder_adds_the_linked_phones(self):
+        bare = pldemo.build(os.path.join(self.tmp.name, "bare", "device"))
+        app = self.make([("bare", bare)])
+        self.assertIsNone(app.pc)
+        self.assertNotIn("PC_phones", app.g.views)
+        root_b, lc_b = self.package("case-b", "CASE B PHONE")
+        self.open(app, root_b)
+        self.assertEqual(app.localcache, lc_b)
+        self.assertIsNotNone(app.pc)
+        self.assertEqual(self.phones(app), {"CASE B PHONE"})
+        self.assertIn("PC_phones", app.nav.get_children("grp:linked"))
+
+    def test_live_views_are_dropped_for_a_folder_that_is_not_this_pc(self):
+        root_a, lc_a = self.package("case-a", "CASE A PHONE")
+        root_b, _ = self.package("case-b", "CASE B PHONE")
+        app = self.make(V.P.find_device_dirs(root_a), localcache=lc_a, connections=V.C.demo_source())
+        self.assertTrue(app.nav.exists("grp:conn"))
+        with mock.patch.object(V.C, "LiveSource", side_effect=AssertionError("never read the real PC in tests")):
+            self.open(app, root_b)
+        self.assertIsNone(app.connections)
+        self.assertFalse(app.nav.exists("grp:conn"))
+        self.assertFalse([v for v in app.g.views.values() if v.kind == "conn"])
+        status = app.status.cget("text")
+        self.assertIn("USB/Bluetooth views hidden", status)
+        self.assertIn("--this-pc", status)
+
+    def test_this_pc_flag_keeps_the_live_views(self):
+        root_a, lc_a = self.package("case-a", "CASE A PHONE")
+        root_b, _ = self.package("case-b", "CASE B PHONE")
+        app = self.make(V.P.find_device_dirs(root_a), localcache=lc_a, connections=V.C.demo_source(), this_pc=True)
+        src = app.connections
+        self.open(app, root_b)
+        self.assertIs(app.connections, src)
+        self.assertTrue(app.nav.exists("grp:conn"))
+        self.assertNotIn("USB/Bluetooth views hidden", app.status.cget("text"))
+
+    def test_opening_this_pcs_package_adds_the_live_views(self):
+        root_a, lc_a = self.package("case-a", "CASE A PHONE")
+        root_b, _ = self.package("case-b", "CASE B PHONE")
+        app = self.make(V.P.find_device_dirs(root_a), localcache=lc_a, live_source=V.C.demo_source)
+        self.assertFalse(app.nav.exists("grp:conn"))
+        with mock.patch.object(V, "is_this_pc_package", lambda p, *a: os.path.normcase(p) == os.path.normcase(root_b)):
+            self.open(app, root_b)
+        self.assertIsNotNone(app.connections)
+        self.assertTrue(app.nav.exists("grp:conn"))
+
+    def test_failed_open_keeps_the_previous_linked_phones_and_live_views(self):
+        root_a, lc_a = self.package("case-a", "CASE A PHONE")
+        root_b, lc_b = self.package("case-b", "CASE B PHONE")
+        for dirpath, _, files in os.walk(os.path.join(lc_b, "Indexed")):     # every database in case B is corrupt
+            for f in files:
+                if f.endswith(".db"):
+                    with open(os.path.join(dirpath, f), "wb") as fh:
+                        fh.write(b"this is not a database" * 100)
+        app = self.make(V.P.find_device_dirs(root_a), localcache=lc_a, connections=V.C.demo_source())
+        old_pc, old_conn, old_g = app.pc, app.connections, app.g
+        before = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith(("plrelate-", "pldevices-"))}
+        err = self.open(app, root_b)
+        self.assertEqual(err.call_count, 1)
+        self.assertEqual(app.localcache, lc_a)
+        self.assertIs(app.connections, old_conn)
+        self.assertIs(app.pc, old_pc)
+        self.assertIs(app.g, old_g)
+        self.assertTrue(os.path.isdir(old_pc.work), "case A's package copy must stay")
+        self.assertEqual(self.phones(app), {"CASE A PHONE"})
+        self.assertTrue(app.nav.exists("grp:conn"))
+        self.assertNotIn("USB/Bluetooth views hidden", app.status.cget("text"))
+        after = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith(("plrelate-", "pldevices-"))}
+        self.assertEqual(after - before, set(), "the failed case's partial copies must be removed")
+        app.window_min.set("7")
+        app.rebuild()                             # a rebuild still uses case A's package
+        self.assertEqual(self.phones(app), {"CASE A PHONE"})
+
+
 class DemoRedactionTest(unittest.TestCase):
     def test_demo_mode_never_shows_a_local_path(self):
         with tempfile.TemporaryDirectory() as tmp:

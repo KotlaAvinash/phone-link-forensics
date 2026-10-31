@@ -282,13 +282,19 @@ def _dpi_aware():
 
 class Viewer(tk.Tk):
     def __init__(self, devices, window_min=R.DEFAULT_WINDOW_MIN, initial=None, localcache=None, connections=None,
-                 redact=False):
+                 redact=False, this_pc=False, live_source=None):
+        """this_pc: the examiner asked for this PC's live USB/Bluetooth views (--this-pc), so they stay whatever
+        folder is opened later. live_source: makes the live source when a folder opened later is this PC's own
+        Phone Link package (default: plconnect.LiveSource on Windows; tests pass a fake)."""
         _dpi_aware()
         super().__init__()
         self.devices = devices
         self.localcache = localcache
         self.redact = redact  # demo / screenshots: never show this computer's real paths
         self.connections = C.CachedSource(connections) if connections is not None else None
+        self.this_pc = this_pc
+        self.live_source = live_source if live_source is not None else (C.LiveSource if os.name == "nt" else None)
+        self.conn_note = ""   # why the live USB/Bluetooth views are not shown, when they were dropped
         self.pc = None
         self.leftovers = []
         self._last_min = min(NEARBY_MAX, max(NEARBY_MIN, int(window_min)))   # last valid Nearby value
@@ -457,27 +463,47 @@ class Viewer(tk.Tk):
         self._last_min = min(NEARBY_MAX, max(NEARBY_MIN, n))
         return self._last_min
 
-    def _load(self, path, minutes):
+    def _load(self, path, minutes, localcache, connections):
         """Copy, verify and relate one device. Returns (evidence, graph, linked-phones copy); nothing is kept on failure."""
         ev = R.Evidence(path)
         try:
             g = R.build(ev, minutes)
-            pc = self._add_linked_phones(g)
+            pc = self._add_linked_phones(g, localcache, connections)
         except BaseException:
             self._remember(ev.close())
             raise
         return ev, g, pc
 
-    def load_device(self, i, initial=None, devices=None):
-        """Load device i of self.devices (or of `devices`, which then replaces it). A failure changes nothing: the
-        previous device stays loaded, the picker goes back to it, and its copies are not touched."""
+    def sources_for(self, path):
+        """(LocalCache, live connections source, note) that belong to a newly opened input `path`. Nothing is
+        committed here: load_device keeps them only if the input loads."""
+        localcache = D.find_localcache(path)
+        if self.this_pc and self.connections is not None:      # --this-pc: the examiner asked for this PC's views
+            return localcache, self.connections, ""
+        if is_this_pc_package(path):
+            if self.connections is not None:
+                return localcache, self.connections, ""
+            src = self.live_source() if self.live_source else None
+            return localcache, (C.CachedSource(src) if src is not None else None), ""
+        note = ""
+        if self.connections is not None or self.conn_note:
+            note = ("USB/Bluetooth views hidden: the opened folder is not this PC's live Phone Link package; "
+                    "use --this-pc to show this PC's connections anyway")
+        return localcache, None, note
+
+    def load_device(self, i, initial=None, devices=None, sources=None):
+        """Load device i of self.devices (or of `devices`, which then replaces it). `sources` is the
+        (LocalCache, connections, note) of a newly opened input; None keeps the current ones. A failure changes
+        nothing: the previous device, its linked-phone and connection views stay, the picker goes back to it, and
+        its copies are not touched."""
         pool = self.devices if devices is None else devices
         label, path = pool[i]
+        localcache, connections, conn_note = sources or (self.localcache, self.connections, self.conn_note)
         self.config(cursor="watch")
         self.update_idletasks()
         minutes = self.nearby()
         try:
-            ev, g, pc = self._load(path, minutes)
+            ev, g, pc = self._load(path, minutes, localcache, connections)
         except Exception as e:  # report and keep the window usable
             self.config(cursor="")
             if self.g is not None and self.dev_idx is not None:
@@ -486,8 +512,9 @@ class Viewer(tk.Tk):
             messagebox.showerror("Could not load", self._scrub(f"{self._shown(path)}\n\n{self._why(e)}") + kept)
             return False
         self.config(cursor="")
-        old = (self.ev, self.pc)
+        old = (self.ev, self.pc)      # the previous device copy AND the previous case's package copy
         self.ev, self.g, self.pc, self.built_min = ev, g, pc, minutes
+        self.localcache, self.connections, self.conn_note = localcache, connections, conn_note
         for o in old:
             if o:
                 self._remember(o.close())
@@ -510,6 +537,8 @@ class Viewer(tk.Tk):
         if stale:
             text += (f"  |  {len(stale)} leftover copy folder(s) from earlier runs in "
                      f"{self._shown(os.path.dirname(stale[0]))} - remove when done")
+        if self.conn_note:
+            text += f"  |  {self.conn_note}"
         self._status(text)
         self.fill_nav()
         self.show(initial or self.cur_vid or "N_notifications")
@@ -530,18 +559,25 @@ class Viewer(tk.Tk):
         self.fill_nav()
         self.show(self.cur_vid)
 
-    def _add_linked_phones(self, g):
-        """Package-level views: every phone ever linked to this PC (copied and verified separately).
+    _CURRENT = object()
+
+    def _add_linked_phones(self, g, localcache=_CURRENT, connections=_CURRENT):
+        """Package-level views: every phone ever linked to this PC (copied and verified separately), from
+        `localcache`, and the live USB/Bluetooth views from `connections` (both default to the current input's).
         Adds them to graph g and returns the copy (or None)."""
+        if localcache is self._CURRENT:
+            localcache = self.localcache
+        if connections is self._CURRENT:
+            connections = self.connections
         pc = None
         try:
-            _, pc = D.build(self.localcache, g, R.View, R.ts_seconds, R.iso)
+            _, pc = D.build(localcache, g, R.View, R.ts_seconds, R.iso)
         except (OSError, ValueError) as e:
             g.add_view(R.View("PC_devices", "Phone pairings (device folders)", "pc", f"could not read: {e}",
                               ["Error"], [{"Error": str(e)}]))
-        if self.connections is not None:
+        if connections is not None:
             try:
-                C.build(self.connections, g, R.View)
+                C.build(connections, g, R.View)
             except OSError as e:
                 g.add_view(R.View("C_phones", "Phone connections", "conn", f"could not read: {e}", ["Error"],
                                   [{"Error": str(e)}]))
@@ -834,7 +870,9 @@ class Viewer(tk.Tk):
             messagebox.showerror("No Phone Link databases",
                                  self._scrub(f"No Phone Link databases found under\n{self._shown(d)}"))
             return
-        self.load_device(0, devices=devs)      # the old list, view and device stay if this one cannot be loaded
+        # the linked-phone and live this-PC views belong to the folder opened, not to the first one; like the old
+        # list, view and device, they stay as they are if this folder cannot be loaded
+        self.load_device(0, devices=devs, sources=self.sources_for(d))
 
     def export(self):
         if self.g is None or not self.cur_vid:
@@ -988,7 +1026,7 @@ def main():
         devices.sort(key=lambda d: -len([f for f in os.listdir(d[1]) if f.endswith(".db")]))  # fullest first
         localcache = D.find_localcache(a.input)
         connections = C.LiveSource() if (a.this_pc or is_this_pc_package(a.input)) and os.name == "nt" else None
-    app = Viewer(devices, a.window, a.view, localcache, connections, redact=a.demo)
+    app = Viewer(devices, a.window, a.view, localcache, connections, redact=a.demo, this_pc=a.this_pc)
     if a.select is not None:
         app.show(app.cur_vid, select_index=a.select)
         app.on_row()
