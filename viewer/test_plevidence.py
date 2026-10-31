@@ -2,6 +2,10 @@
 
     python -B viewer/test_plevidence.py
 """
+import contextlib
+import csv
+import io
+import json
 import os
 import shutil
 import sqlite3
@@ -380,6 +384,247 @@ class FailedStaging(unittest.TestCase):
                 R.tempfile.mkdtemp, P.stage = real_mk, real_stage
             self.assertEqual(len(made), 1)
             self.assertFalse(os.path.exists(made[0]))
+
+
+GUID_A, GUID_B = pldemo.PAIRING_GUIDS[0], pldemo.PAIRING_GUIDS[1]   # synthetic pairing-folder GUIDs
+DELETED_PKG = "com.deleted.from.phone.a."          # prefix of every deleted FullTrust row for device A
+ORPHAN_PKG = "com.orphan.no.device."              # deleted FullTrust rows with a blank device_id
+
+
+def make_device(folder):
+    """A device folder holding one small database (any name in plparse.DB_NAMES makes it a device)."""
+    os.makedirs(folder, exist_ok=True)
+    c = sqlite3.connect(os.path.join(folder, "settings.db"))
+    c.execute("CREATE TABLE s (k TEXT, v TEXT)")
+    c.execute("INSERT INTO s VALUES ('x', 'y')")
+    c.commit()
+    c.close()
+
+
+def make_fulltrust(path, live, deleted):
+    """phone_apps.db with hosted_app_ids. `deleted` rows are inserted, then deleted with free space kept."""
+    c = sqlite3.connect(path)
+    c.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds default to secure_delete ON
+    c.execute("CREATE TABLE hosted_app_ids (row_id INTEGER PRIMARY KEY AUTOINCREMENT, package_id TEXT,"
+              " last_window_position TEXT, device_id TEXT)")
+    c.executemany("INSERT INTO hosted_app_ids (package_id, last_window_position, device_id) VALUES (?, ?, ?)",
+                  deleted + live)
+    c.commit()
+    c.executemany("DELETE FROM hosted_app_ids WHERE package_id = ?", [(r[0],) for r in deleted])
+    c.commit()
+    c.close()
+
+
+def make_package(root, meta=None, live=None, deleted=None):
+    """Two pairing folders {A} and {B} sharing one FullTrust phone_apps.db and one DeviceMetadataStorage.json."""
+    lc = os.path.join(root, "Microsoft.YourPhone_8wekyb3d8bbwe", "LocalCache")
+    for g in (GUID_A, GUID_B):
+        make_device(os.path.join(lc, "Indexed", g, "System", "Database"))
+    ft = os.path.join(lc, "Indexed", "FullTrust")
+    os.makedirs(ft)
+    if deleted is None:
+        deleted = ([(DELETED_PKG + "%02d" % i + "x" * 150, "0,0,800,600", GUID_A) for i in range(40)]
+                   + [(ORPHAN_PKG + "%02d" % i + "y" * 150, "1,1,2,2", "") for i in range(5)])
+    if live is None:
+        live = [("com.live.on.a", "10,10,20,20", GUID_A), ("com.live.on.b", "30,30,40,40", GUID_B)]
+    make_fulltrust(os.path.join(ft, "phone_apps.db"), live, deleted)
+    if meta is None:
+        meta = {"ConfigVersion": 1, "DeviceMetadatas": {
+            "HW-A": [{"IsLinked": True, "Metadata": {"Id": GUID_A, "Metadata": {
+                "Manufacture": "AcmeCorpA", "ModelName": "ZX-9A", "OsName": "Android", "OsVersion": "14"}}}],
+            "HW-OTHER": [{"IsLinked": False, "Metadata": {"Id": "not-a-folder-id", "Metadata": {
+                "Manufacture": "OtherMakerQ", "ModelName": "Q-1"}}}]}}
+    with open(os.path.join(lc, "DeviceMetadataStorage.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    return os.path.join(root, "Microsoft.YourPhone_8wekyb3d8bbwe")
+
+
+def run_main(args):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = P.main(args)
+    return rc, buf.getvalue()
+
+
+def read_text(path):
+    with open(path, encoding="utf-8-sig") as fh:
+        return fh.read()
+
+
+def read_csv_rows(path):
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        return list(csv.DictReader(fh))
+
+
+def read_acq(outdir, label):
+    with open(os.path.join(outdir, label, "acquisition.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+class FullTrustScope(unittest.TestCase):
+    """phone_apps.db is package-wide: its carved and vacant-rowid rows belong to a device only by device_id."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pkg = make_package(os.path.join(self.tmp, "in"))
+        self.out = os.path.join(self.tmp, "out")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_other_devices_deleted_rows_are_not_in_this_device(self):
+        rc, _ = run_main(["--input", self.pkg, "--out", self.out, "--carve"])
+        self.assertEqual(rc, 0)
+        b_dir = os.path.join(self.out, GUID_B)
+        b_carved = read_text(os.path.join(b_dir, "carved_records.csv"))
+        self.assertNotIn(DELETED_PKG, b_carved)
+        self.assertNotIn(GUID_A, b_carved)
+        self.assertNotIn(ORPHAN_PKG, b_carved)
+        self.assertNotIn("phone_apps", read_text(os.path.join(b_dir, "deleted_evidence.csv")))
+        acq_b = read_acq(self.out, GUID_B)
+        b_rows = read_csv_rows(os.path.join(b_dir, "carved_records.csv"))
+        self.assertTrue(all(r["device_id"] == GUID_B for r in b_rows if r.get("table") == "hosted_app_ids"))
+        self.assertEqual(acq_b["counts"]["carved not-live"], 0)      # B's only deleted rows were A's
+        self.assertEqual(acq_b["counts"]["vacant-rowid signals"], 0)
+        self.assertFalse([w for w in acq_b["warnings"] if "hosted_app_ids" in w and "vacant" in w])
+        # device A keeps its own deleted rows, and only its own
+        a_rows = read_csv_rows(os.path.join(self.out, GUID_A, "carved_records.csv"))
+        a_ft = [r for r in a_rows if r.get("table") == "hosted_app_ids"]
+        self.assertTrue(a_ft, "device A's own deleted FullTrust rows should be carved into its output")
+        self.assertTrue(all(r["device_id"] == GUID_A for r in a_ft))
+        self.assertTrue(any(r["package_id"].startswith(DELETED_PKG) for r in a_ft))
+        self.assertNotIn(ORPHAN_PKG, read_text(os.path.join(self.out, GUID_A, "carved_records.csv")))
+
+    def test_unattributable_rows_go_to_the_package_output(self):
+        run_main(["--input", self.pkg, "--out", self.out, "--carve"])
+        pkg_dir = os.path.join(self.out, "_package")
+        rows = read_csv_rows(os.path.join(pkg_dir, "carved_records.csv"))
+        self.assertTrue(any(r.get("package_id", "").startswith(ORPHAN_PKG) for r in rows))
+        self.assertTrue(all(r["scope"] == "package" for r in rows))
+        self.assertFalse(any(r.get("device_id") in (GUID_A, GUID_B) for r in rows))
+        self.assertIn("hosted_app_ids", read_text(os.path.join(pkg_dir, "deleted_evidence.csv")))
+
+    def test_fulltrust_carve_error_is_reported(self):
+        real = plcarve.carve_db
+
+        def carve(path, *a, **k):
+            if os.path.basename(path) == "phone_apps.db":
+                raise OSError("simulated read error")
+            return real(path, *a, **k)
+        plcarve.carve_db = carve
+        try:
+            run_main(["--input", self.pkg, "--out", self.out, "--carve"])
+        finally:
+            plcarve.carve_db = real
+        for g in (GUID_A, GUID_B):
+            w = read_acq(self.out, g)["warnings"]
+            self.assertTrue([x for x in w if "phone_apps.db" in x and "simulated read error" in x], w)
+
+    def test_label_that_is_not_a_guid_gets_no_fulltrust_rows(self):
+        dump = os.path.join(self.tmp, "triage")
+        make_device(dump)
+        make_fulltrust(os.path.join(dump, "phone_apps.db"),
+                       [("com.live.on.a", "1", GUID_A), ("com.live.blank", "2", "")],
+                       [(DELETED_PKG + "%02d" % i + "x" * 150, "0", GUID_A) for i in range(40)])
+        out = os.path.join(self.tmp, "out2")
+        run_main(["--input", dump, "--out", out, "--carve"])
+        d = os.path.join(out, "triage")
+        self.assertNotIn(DELETED_PKG, read_text(os.path.join(d, "carved_records.csv")))
+        self.assertFalse([r for r in read_csv_rows(os.path.join(d, "apps.csv")) if r.get("streamed_to_pc")])
+        w = read_acq(out, "triage")["warnings"]
+        self.assertTrue([x for x in w if "not a pairing-folder GUID" in x], w)
+
+
+class MetadataScope(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.pkg = make_package(os.path.join(self.tmp, "in"))
+        self.out = os.path.join(self.tmp, "out")
+        run_main(["--input", self.pkg, "--out", self.out])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_device_without_entry_says_so(self):
+        md = read_acq(self.out, GUID_B)["device_metadata"]
+        self.assertEqual(md["entries"], [])
+        self.assertIn("no metadata entry matches this device folder", md["note"])
+        self.assertNotIn("AcmeCorpA", json.dumps(md))
+        others = read_acq(self.out, GUID_B)["package_metadata_other_entries"]
+        self.assertEqual({e["id"] for e in others}, {GUID_A, "not-a-folder-id"})
+        html_b = read_text(os.path.join(self.out, GUID_B, "report.html"))
+        dev, sep, pkg = html_b.partition("Package-wide")
+        self.assertTrue(sep, "the package's other entries need their own package-wide heading")
+        self.assertIn("no metadata entry matches this device folder", dev)
+        self.assertNotIn("AcmeCorpA", dev)
+        self.assertIn("AcmeCorpA", pkg)
+
+    def test_device_with_entry_gets_only_its_own(self):
+        md = read_acq(self.out, GUID_A)["device_metadata"]
+        self.assertEqual([e["make"] for e in md["entries"]], ["AcmeCorpA"])
+        self.assertNotIn("OtherMakerQ", json.dumps(md))
+        html_a = read_text(os.path.join(self.out, GUID_A, "report.html"))
+        dev, _, _ = html_a.partition("Package-wide")
+        self.assertIn("AcmeCorpA", dev)
+        self.assertNotIn("OtherMakerQ", dev)
+
+    def test_package_inputs_are_hashed(self):
+        lc = os.path.join(self.pkg, "LocalCache")
+        ft = os.path.join(lc, "Indexed", "FullTrust", "phone_apps.db")
+        js = os.path.join(lc, "DeviceMetadataStorage.json")
+        for g in (GUID_A, GUID_B):
+            pf = {r["file"]: r for r in read_acq(self.out, g)["package_files"]}
+            self.assertEqual(pf["FullTrust/phone_apps.db"]["sha256"], P.sha256(ft))
+            self.assertEqual(pf["DeviceMetadataStorage.json"]["sha256"], P.sha256(js))
+        with open(os.path.join(self.out, "_package", "acquisition.json"), encoding="utf-8") as fh:
+            pkg = json.load(fh)
+        self.assertEqual({r["file"] for r in pkg["package_files"]},
+                         {"FullTrust/phone_apps.db", "DeviceMetadataStorage.json"})
+
+
+class Recoverability(unittest.TestCase):
+    """secure_delete is a setting of the analysing connection, not of the file. Judge by the file's bytes."""
+
+    def make(self, folder, secure):
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "settings.db")
+        c = sqlite3.connect(path)
+        c.execute("PRAGMA secure_delete = %s" % ("ON" if secure else "OFF"))
+        c.execute("CREATE TABLE s (k TEXT, v TEXT)")
+        c.executemany("INSERT INTO s VALUES (?, ?)", [("k%d" % i, "secret value %d " % i * 20) for i in range(300)])
+        c.commit()
+        c.execute("DELETE FROM s")
+        c.commit()
+        c.close()
+        return path
+
+    def test_secure_delete_is_not_reported_from_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.make(os.path.join(tmp, "dev"), secure=True)
+            h = P.db_health(path)
+            self.assertGreater(h["freelist_count"], 0)
+            self.assertNotIn("secure_delete", h)
+            self.assertEqual(h["free_pages_with_residue"], 0)
+
+    def test_zeroed_free_pages_are_not_called_recoverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make(os.path.join(tmp, "dev"), secure=True)
+            out = os.path.join(tmp, "out")
+            run_main(["--input", os.path.join(tmp, "dev"), "--out", out])
+            acq = read_acq(out, "dev")
+            self.assertFalse([w for w in acq["warnings"] if "secure_delete" in w or "recoverable" in w],
+                             acq["warnings"])
+            self.assertNotIn("secure_delete = 0", read_text(os.path.join(out, "dev", "report.html")))
+
+    def test_free_pages_with_bytes_left_are_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.make(os.path.join(tmp, "dev"), secure=False)
+            h = P.db_health(path)
+            self.assertGreater(h["free_pages_with_residue"], 0)
+            out = os.path.join(tmp, "out")
+            run_main(["--input", os.path.join(tmp, "dev"), "--out", out])
+            w = read_acq(out, "dev")["warnings"]
+            self.assertTrue([x for x in w if "settings.db" in x and "non-zero" in x], w)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,10 @@ What is in notifications.db
   phone_requests              requests the PC queued for the phone, with lifecycle times
 
 Phone Link deletes a notification when it is dismissed, so the live table is often
-empty. Deleted rows survive in free pages (secure_delete is off), so the table is
-also carved with plcarve and the recovered rows are shown with Source = deleted.
+empty. Deleted rows can survive in free pages, freeblocks and the WAL, so the table is
+also carved with plcarve and the recovered rows are shown with Source = deleted. Whether
+anything survives depends on the bytes left in the file, not on PRAGMA secure_delete: that
+pragma reports the analysing connection's setting and is not stored in the evidence file.
 
 Decodes marked [published] follow the Android API reference (Notification.flags,
 NotificationManager importance, Notification priority, StatusBarNotification.getKey).

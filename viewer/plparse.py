@@ -24,11 +24,31 @@ Design notes that matter forensically:
     rule it applied, per value, in the *_epoch column.
   * Correlation is done here, not by the data. Every joined name is an
     inference by this tool and is labelled as such in the output.
+  * FullTrust\\phone_apps.db is PACKAGE-WIDE: one file shared by every device
+    folder. It is staged, hashed and carved once. A row of it (live or carved) is
+    credited to a device ONLY when its hosted_app_ids.device_id equals that
+    device's folder GUID (case and braces ignored). Rows whose device_id is blank,
+    unknown or another phone's are never written into a device's outputs or
+    counts; they go to <out>\\_package\\ (carved_records.csv with scope=package,
+    fulltrust_hosted_app_ids.csv with the folder each live row was credited to).
+    Its vacant-rowid counter (sqlite_sequence) cannot be split by device, so it is
+    reported only in _package\\deleted_evidence.csv. A device whose label is not a
+    GUID (a plain folder of .db files) receives no FullTrust row at all, and its
+    warnings say so. Per-device carved rows carry scope=device.
+  * DeviceMetadataStorage.json is also package-wide. Each device's report and
+    acquisition.json get only the entry/entries whose Metadata.Id equals the
+    folder GUID, or an explicit "no metadata entry matches this device folder";
+    the other entries are listed separately, headed as package-wide. Both
+    package-wide inputs are hashed and recorded under "package_files" in every
+    acquisition.json and in _package\\acquisition.json.
+  * Recoverability is judged from the file: freelist_count and whether the free
+    pages still hold non-zero bytes. PRAGMA secure_delete is never reported - it
+    is the analysing connection's setting, not a property of the evidence file.
 
 Stdlib only. Read-only with respect to the evidence.
 """
 
-import argparse, csv, hashlib, html, json, os, pathlib, re, shutil, sqlite3, sys, tempfile
+import argparse, csv, hashlib, html, json, os, pathlib, re, shutil, sqlite3, struct, sys, tempfile
 try:
     import plcarve
 except ImportError:
@@ -148,6 +168,26 @@ def find_fulltrust(root):
     return None
 
 
+GUID_RE = re.compile(r"^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$")
+
+
+def is_guid(v):
+    return bool(GUID_RE.match(str(v or "").strip()))
+
+
+def norm_guid(v):
+    return str(v or "").strip().strip("{}").lower()
+
+
+def owns_ft_row(device_id, label):
+    """
+    True only when a package-wide FullTrust row names this pairing folder: the folder label
+    is a GUID and the row's device_id is the same GUID (case and braces ignored). A blank,
+    unknown or other device_id, or a label that is not a GUID, never matches.
+    """
+    return is_guid(label) and norm_guid(device_id) == norm_guid(label)
+
+
 def find_metadata(root):
     root = os.path.abspath(root)
     for base in (root, os.path.join(root, "LocalCache"),
@@ -156,6 +196,70 @@ def find_metadata(root):
         if os.path.isfile(p):
             return p
     return None
+
+
+META_FILE = "DeviceMetadataStorage.json"
+NO_META_MATCH = ("no metadata entry matches this device folder (the phone may have been unlinked). "
+                 "The package's other entries are listed separately as package-wide.")
+
+
+def read_metadata(meta_src, pkg_acq):
+    """
+    Read DeviceMetadataStorage.json (package-wide: one entry list per hardware ID, for every
+    phone ever paired). The bytes are read once, hashed, and those same bytes parsed, so the
+    recorded hash is of exactly what was read. Returns (entries, error).
+    """
+    if not meta_src:
+        return [], ""
+    try:
+        with open(meta_src, "rb") as fh:
+            blob = fh.read()
+    except OSError as e:
+        pkg_acq.append({"file": META_FILE, "status": "unreadable", "source": meta_src, "error": str(e)})
+        return [], "could not read %s: %s" % (META_FILE, e)
+    pkg_acq.append({"file": META_FILE, "status": "read (not copied - parsed from these bytes)",
+                    "source": meta_src, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest()})
+    entries = []
+    try:
+        raw = json.loads(blob.decode("utf-8-sig"))
+        for hw, lst in (raw.get("DeviceMetadatas") or {}).items():
+            for e in lst or []:
+                m = e.get("Metadata", {}) or {}
+                inner = m.get("Metadata", {}) or {}
+                entries.append({
+                    "id": m.get("Id", ""), "hardware_id": hw, "linked": e.get("IsLinked"),
+                    # Microsoft ships this key misspelled; read both.
+                    "registered": m.get("RegitrationTime") or m.get("RegistrationTime"),
+                    "last_seen": m.get("LastSeenTime"),
+                    "os": "%s %s" % (inner.get("OsName", ""), inner.get("OsVersion", "")),
+                    "make": inner.get("Manufacture"), "model": inner.get("ModelName"),
+                    "client": inner.get("ClientType"), "client_ver": inner.get("ClientVersion"),
+                    "capabilities": inner.get("Capabilities"),
+                })
+    except (ValueError, TypeError, AttributeError) as e:
+        return [], "could not parse %s: %s: %s" % (META_FILE, type(e).__name__, e)
+    return entries, ""
+
+
+def device_metadata(label, entries, error, meta_src):
+    """
+    Split the package-wide metadata into this device's entry/entries (Metadata.Id equal to
+    the folder GUID) and everyone else's. Returns (this_device, package_other_entries).
+    """
+    mine = [e for e in entries if is_guid(label) and norm_guid(e.get("id")) == norm_guid(label)]
+    others = [e for e in entries if e not in mine]
+    if not meta_src:
+        note = "%s was not found; no device metadata available." % META_FILE
+    elif error:
+        note = error
+    elif mine:
+        note = "%d entry(ies) whose Metadata.Id equals this device folder's GUID." % len(mine)
+    else:
+        note = NO_META_MATCH
+        if not is_guid(label):
+            note += " (Device label %r is not a pairing-folder GUID, so no entry can be matched.)" % label
+    return ({"source": META_FILE, "match_rule": "Metadata.Id == device folder GUID",
+             "entries": mine, "note": note}, others)
 
 
 # ---------------------------------------------------------------- acquisition
@@ -182,7 +286,7 @@ def _source_state(src):
     return (sha256(src), sha256(w) if os.path.isfile(w) else "")
 
 
-def stage(src_dir, work, acq):
+def stage(src_dir, work, acq, names=DB_NAMES):
     """
     Copy every .db WITH its -wal/-shm. Report what was and was not found.
 
@@ -195,7 +299,7 @@ def stage(src_dir, work, acq):
     """
     os.makedirs(work, exist_ok=True)
     staged = {}
-    for name in DB_NAMES:
+    for name in names:
         src = os.path.join(src_dir, name)
         if not os.path.isfile(src):
             acq.append({"file": name, "status": "absent"})
@@ -290,12 +394,62 @@ def deleted_evidence(path, dbname):
     return out
 
 
+def free_page_residue(path):
+    """
+    Free pages in the main file that still hold non-zero bytes (for a freelist trunk page,
+    bytes after its pointer array). Returns None when the file cannot be read as SQLite.
+
+    This, not PRAGMA secure_delete, is what says whether free pages are worth carving.
+    secure_delete is a setting of the CONNECTION that runs the PRAGMA - the analysis
+    host's SQLite build default - and is not stored in the file: a database written with
+    secure_delete ON (free pages zero-filled) reads back 0 on a build whose default is off.
+    Cheap check: main file only (not the -wal), and freeblocks inside live pages are not
+    examined - zero here does not mean nothing can be carved from freeblocks or the WAL.
+    """
+    try:
+        with open(path, "rb") as fh:
+            hdr = fh.read(100)
+            if len(hdr) < 100 or hdr[:16] != b"SQLite format 3\x00":
+                return None
+            ps = struct.unpack(">H", hdr[16:18])[0]
+            ps = 65536 if ps == 1 else ps
+            size = os.fstat(fh.fileno()).st_size
+
+            def page(n):
+                fh.seek((n - 1) * ps)
+                return fh.read(ps)
+
+            hits, seen = 0, set()
+            trunk = struct.unpack(">I", hdr[32:36])[0]
+            while trunk and trunk not in seen and trunk * ps <= size:
+                seen.add(trunk)
+                data = page(trunk)
+                nxt, cnt = struct.unpack(">II", data[:8])
+                cnt = min(cnt, (ps - 8) // 4)
+                if data[8 + 4 * cnt:].strip(b"\x00"):
+                    hits += 1
+                for i in range(cnt):
+                    leaf = struct.unpack(">I", data[8 + 4 * i:12 + 4 * i])[0]
+                    if leaf and leaf not in seen and leaf * ps <= size:
+                        seen.add(leaf)
+                        if page(leaf).strip(b"\x00"):
+                            hits += 1
+                trunk = nxt
+            return hits
+    except (OSError, struct.error):
+        return None
+
+
 def db_health(path):
-    """PRAGMAs that decide whether the evidence is complete and carvable."""
+    """
+    PRAGMAs that decide whether the evidence is complete and carvable, plus what the FILE
+    shows about its free pages (free_pages_with_residue). PRAGMA secure_delete is
+    deliberately not reported: it describes the analysis host's connection, not the file.
+    """
     out = {}
     try:
         c = sqlite3.connect(ro_uri(path), uri=True)
-        for p in ("journal_mode", "page_count", "freelist_count", "page_size", "secure_delete"):
+        for p in ("journal_mode", "page_count", "freelist_count", "page_size"):
             try:
                 out[p] = c.execute("PRAGMA " + p).fetchone()[0]
             except sqlite3.Error:
@@ -303,6 +457,8 @@ def db_health(path):
         c.close()
     except sqlite3.Error as e:
         out["error"] = str(e)
+    res = free_page_residue(path)
+    out["free_pages_with_residue"] = "?" if res is None else res
     return out
 
 
@@ -522,13 +678,14 @@ def parse_all(dbs, ft_db, idx, digits, device_label=None):
     # --- apps: installed x streamed ----------------------------------------
     # hosted_app_ids is SHARED across devices and carries device_id. Scope it, or
     # a device's streamed-app list is silently credited to every other device.
+    # A row is this device's only when its device_id equals the folder GUID: blank or
+    # other ids, and labels that are not GUIDs, get nothing (see owns_ft_row).
     hosted = {}
     ft_rows = q(ft_db, "SELECT * FROM hosted_app_ids")
     ft_devices = sorted({(r.get("device_id") or "") for r in ft_rows})
     for r in ft_rows:
-        did = r.get("device_id") or ""
-        if device_label and did and did != device_label:
-            continue                      # belongs to a different linked device
+        if device_label is not None and not owns_ft_row(r.get("device_id"), device_label):
+            continue                      # another device's, or not attributable to any device
         hosted[r["package_id"]] = r
     apps = []
     seen = set()
@@ -674,6 +831,9 @@ def esc(x):
 
 
 def html_report(out, case, dev, meta, acq, health, d, tl, counts, digits, warnings):
+    """meta is (this_device_metadata, package_other_entries) from device_metadata()."""
+    dev_meta, other_meta = meta
+
     def table(rows, cols, limit=40):
         if not rows:
             return "<p class=muted>No rows.</p>"
@@ -706,7 +866,7 @@ def html_report(out, case, dev, meta, acq, health, d, tl, counts, digits, warnin
 
     hl = "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
         esc(k), esc(v.get("journal_mode")), esc(v.get("page_count")),
-        esc(v.get("freelist_count")), esc(v.get("secure_delete"))) for k, v in health.items())
+        esc(v.get("freelist_count")), esc(v.get("free_pages_with_residue"))) for k, v in health.items())
 
     warn_html = "".join("<li>%s</li>" % esc(w) for w in warnings) or "<li>None raised.</li>"
 
@@ -756,12 +916,20 @@ Rows with an empty <span class=mono>name_source</span> were not matched to any c
 at copy time — expected only if the app had exited cleanly.</p>
 
 <h2>Database health</h2>
-<table><tr><th>File</th><th>journal_mode</th><th>pages</th><th>freelist</th><th>secure_delete</th></tr>%(hl)s</table>
-<p class=muted>freelist &gt; 0 with secure_delete = 0 means deleted rows are recoverable by carving the free pages.</p>
+<table><tr><th>File</th><th>journal_mode</th><th>pages</th><th>freelist</th><th>free pages with non-zero bytes</th></tr>%(hl)s</table>
+<p class=muted>The last column is read from the file itself: free pages that still hold non-zero bytes are worth
+carving (residue is not proof of a recoverable record). Zero-filled free pages hold nothing to carve; freeblocks
+inside live pages and the WAL are not covered by this check. PRAGMA secure_delete is not shown: it is a setting of
+the analysing SQLite connection, not a property stored in the evidence file.</p>
 
 <h2>Warnings</h2><ul>%(warn)s</ul>
 
-<h2>Device</h2><pre class=mono>%(meta)s</pre>
+<h2>Device</h2><p>%(meta_note)s</p><pre class=mono>%(meta)s</pre>
+
+<h2>Package-wide: other phones in DeviceMetadataStorage.json (NOT this device folder)</h2>
+<p class=muted>These entries belong to the Phone Link package as a whole - their Metadata.Id does not equal
+this device folder's GUID. They are listed for context only and say nothing about this device.</p>
+<pre class=mono>%(meta_other)s</pre>
 
 <h2>SIM / subscriber</h2>%(sims)s
 <h2>Timeline (most recent)</h2>%(tl)s
@@ -774,7 +942,9 @@ at copy time — expected only if the app had exited cleanly.</p>
 Validate every join against the databases before relying on it in a report.</footer></body></html>""" % {
         "case": esc(case), "dev": esc(dev), "now": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "tool": TOOL, "ver": VERSION, "cnt": cnt, "acq": acq_rows, "hl": hl, "warn": warn_html,
-        "digits": digits, "meta": esc(json.dumps(meta, indent=1)[:2500]),
+        "digits": digits, "meta_note": esc(dev_meta.get("note", "")),
+        "meta": esc(json.dumps(dev_meta.get("entries", []), indent=1, default=str)[:2500]),
+        "meta_other": esc(json.dumps(other_meta, indent=1, default=str)[:2500]),
         "sims": table(d["sims"], ["subscription_id", "own_number", "carrier", "country", "sim_slot",
                                   "roaming", "default_sms", "default_voice", "rcs_supported"]),
         "tl": table(tl, ["timestamp_utc", "event", "party", "detail", "source"], 60),
@@ -792,8 +962,55 @@ Validate every join against the databases before relying on it in a report.</foo
         fh.write(doc)
 
 
+# ---------------------------------------------------------------- package-wide output
+PACKAGE_DIR = "_package"
+
+
+def write_package(a, pkg_acq, pkg_warnings, devs, ft_work, ft_carved, ft_attributed,
+                  ft_carve_stats, ft_gone, meta_entries):
+    """
+    Write <out>\\_package: what belongs to the Phone Link package as a whole and must not be
+    credited to any one device folder - carved FullTrust rows whose device_id is blank, unknown
+    or another phone's, the FullTrust carve statistics and vacant-rowid counter, every live
+    hosted_app_ids row with the device folder (if any) it was attributed to, every
+    DeviceMetadataStorage.json entry, and the hashes of both package-wide input files.
+    """
+    pdir = os.path.join(a.out, PACKAGE_DIR)
+    os.makedirs(pdir, exist_ok=True)
+    labels = [lb for lb, _ in devs]
+    unattributed = [dict(r, scope="package") for r in ft_carved if id(r) not in ft_attributed]
+    live = []
+    if ft_work:
+        for r in q(ft_work, "SELECT * FROM hosted_app_ids"):
+            owner = [lb for lb in labels if owns_ft_row(r.get("device_id"), lb)]
+            live.append(dict(r, attributed_to_device_folder=owner[0] if owner else ""))
+    write_csv(os.path.join(pdir, "carved_records.csv"), unattributed)
+    write_csv(os.path.join(pdir, "carve_stats.csv"), ft_carve_stats)
+    write_csv(os.path.join(pdir, "deleted_evidence.csv"), ft_gone)
+    write_csv(os.path.join(pdir, "fulltrust_hosted_app_ids.csv"), live)
+    counts = {"carved FullTrust rows (all)": len(ft_carved),
+              "carved FullTrust rows credited to a device": len(ft_carved) - len(unattributed),
+              "carved FullTrust rows not attributable": len(unattributed),
+              "live hosted_app_ids rows": len(live),
+              "live hosted_app_ids rows not attributable": sum(1 for r in live
+                                                               if not r["attributed_to_device_folder"])}
+    with open(os.path.join(pdir, "acquisition.json"), "w", encoding="utf-8") as fh:
+        json.dump({"tool": TOOL, "version": VERSION, "scope": "package",
+                   "generated_utc": datetime.now(timezone.utc).isoformat(),
+                   "input": a.input, "device_folders": labels,
+                   "package_files": pkg_acq, "warnings": pkg_warnings, "counts": counts,
+                   "device_metadata_all_entries": meta_entries},
+                  fh, indent=2, default=str)
+    print("[%s]" % PACKAGE_DIR)
+    for k, v in counts.items():
+        print("    %-44s %s" % (k, v))
+    for w in pkg_warnings:
+        print("    ! %s" % w)
+    print("    -> %s" % pdir)
+
+
 # ---------------------------------------------------------------- main
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="Phone Link correlating parser")
     ap.add_argument("--input", required=True, help="package root, Indexed dir, device dir, or a folder of .db files")
     ap.add_argument("--out", required=True, help="output directory")
@@ -802,8 +1019,19 @@ def main():
     ap.add_argument("--keep-work", action="store_true", help="keep the staged copies")
     ap.add_argument("--carve", action="store_true",
                     help="also carve deleted records from free pages, freeblocks, page slack and WAL frames")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    # Package-wide inputs (FullTrust phone_apps.db) are staged once, here, for every device.
+    pkg_work = tempfile.mkdtemp(prefix="plparse_pkg_")
+    try:
+        return run(a, pkg_work)
+    finally:
+        if a.keep_work:
+            print("package-wide staged copies kept at %s" % pkg_work)
+        else:
+            shutil.rmtree(pkg_work, ignore_errors=True)
 
+
+def run(a, pkg_work):
     devs = find_device_dirs(a.input)
     if not devs:
         print("No device database folders found under: %s" % a.input, file=sys.stderr)
@@ -812,32 +1040,41 @@ def main():
 
     ft_src = find_fulltrust(a.input)
     meta_src = find_metadata(a.input)
-    meta = {}
-    if meta_src:
-        try:
-            with open(meta_src, "r", encoding="utf-8-sig") as fh:
-                raw = json.load(fh)
-            for hw, entries in (raw.get("DeviceMetadatas") or {}).items():
-                for e in entries or []:
-                    m = e.get("Metadata", {}) or {}
-                    inner = m.get("Metadata", {}) or {}
-                    meta.setdefault(m.get("Id", hw), {
-                        "hardware_id": hw, "linked": e.get("IsLinked"),
-                        # Microsoft ships this key misspelled; read both.
-                        "registered": m.get("RegitrationTime") or m.get("RegistrationTime"),
-                        "last_seen": m.get("LastSeenTime"),
-                        "os": "%s %s" % (inner.get("OsName", ""), inner.get("OsVersion", "")),
-                        "make": inner.get("Manufacture"), "model": inner.get("ModelName"),
-                        "client": inner.get("ClientType"), "client_ver": inner.get("ClientVersion"),
-                        "capabilities": inner.get("Capabilities"),
-                    })
-        except (ValueError, OSError) as e:
-            meta = {"error": "could not read DeviceMetadataStorage.json: %s" % e}
+    pkg_acq, pkg_warnings = [], []
+    meta_entries, meta_error = read_metadata(meta_src, pkg_acq)
+    if meta_error:
+        pkg_warnings.append(meta_error)
 
     os.makedirs(a.out, exist_ok=True)
     print("%s %s" % (TOOL, VERSION))
     print("Found %d device folder(s). FullTrust db: %s. Metadata: %s\n"
           % (len(devs), "yes" if ft_src else "no", "yes" if meta_src else "no"))
+
+    # ---- package-wide inputs: staged, carved and read ONCE, then split by device_id
+    ft_work, ft_carved, ft_carve_stats, ft_carve_error, ft_gone = None, [], [], None, []
+    if ft_src:
+        ft_acq = []
+        ft_work = stage(os.path.dirname(ft_src), pkg_work, ft_acq, names=[FULLTRUST_DB]).get(FULLTRUST_DB)
+        for r in ft_acq:
+            r.update({"file": "FullTrust/" + FULLTRUST_DB, "source": ft_src})
+        pkg_acq.extend(ft_acq)
+    if ft_work:
+        if a.carve and plcarve is not None:
+            try:
+                ft_carved, st = plcarve.carve_db(ft_work)
+                ft_carve_stats = [st]
+            except (OSError, ValueError, sqlite3.Error) as e:
+                ft_carve_error = ("carve failed on FullTrust/%s (package-wide): %s: %s"
+                                  % (FULLTRUST_DB, type(e).__name__, e))
+                pkg_warnings.append(ft_carve_error)
+        ft_gone = deleted_evidence(ft_work, "FullTrust/" + FULLTRUST_DB)
+        for g in ft_gone:
+            if g["classification"] == "churn-or-deletion":
+                pkg_warnings.append("%s.%s: %s live row(s), %s rowid(s) vacant across ALL devices - the "
+                                    "counter is package-wide and cannot be split by device. Sync churn is "
+                                    "the ordinary cause; NOT proof of user deletion."
+                                    % (g["db"], g["table"], g["live_rows"], g["rowids_unused"]))
+    ft_attributed = set()                    # id() of carved FullTrust rows credited to a device
 
     summary = []
     for label, src in devs:
@@ -850,13 +1087,10 @@ def main():
             if not dbs:
                 print("[%s] no databases — skipped" % label)
                 continue
-            ft_work = None
-            if ft_src:
-                ft_work = os.path.join(work, "ft_" + FULLTRUST_DB)
-                shutil.copy2(ft_src, ft_work)
-                for suf in ("-wal", "-shm"):
-                    if os.path.isfile(ft_src + suf):
-                        shutil.copy2(ft_src + suf, ft_work + suf)
+            if ft_src and not is_guid(label):
+                warnings.append("Device label %r is not a pairing-folder GUID, so no row of the package-wide "
+                                "FullTrust %s (live or carved) is attributed to it. Rows that cannot be "
+                                "attributed are written to the _package folder." % (label, FULLTRUST_DB))
 
             health = {n: db_health(p) for n, p in dbs.items()}
             for n, h in health.items():
@@ -864,9 +1098,16 @@ def main():
                         x["file"] == n and x.get("wal") for x in acq):
                     warnings.append("%s is in WAL mode but no -wal file was present at copy time. "
                                     "If the source was live, data may be missing." % n)
-                if h.get("freelist_count", 0) and h.get("secure_delete") == 0:
-                    warnings.append("%s has %s free pages with secure_delete=0 - deleted rows are "
-                                    "likely recoverable by carving." % (n, h["freelist_count"]))
+                fl, res = h.get("freelist_count"), h.get("free_pages_with_residue")
+                if isinstance(fl, int) and fl > 0 and isinstance(res, int):
+                    if res > 0:
+                        warnings.append("%s has %s free page(s); %s of them still hold non-zero bytes in the "
+                                        "file - deleted content may be recoverable by carving (residue is "
+                                        "not proof of a record)." % (n, fl, res))
+                    else:
+                        warnings.append("%s has %s free page(s), all zero-filled in the file - nothing to "
+                                        "carve from free pages (freeblocks and the WAL are not covered by "
+                                        "this check)." % (n, fl))
 
             del QUERY_ERRORS[:]                      # per-device
             idx = build_contact_index(dbs.get("contacts.db"), a.digits)
@@ -893,12 +1134,16 @@ def main():
                             continue
                         carve_stats.append(st)
                         carved.extend(rs)
-                    if ft_work:
-                        try:
-                            rs, st = plcarve.carve_db(ft_work)
-                            carve_stats.append(st); carved.extend(rs)
-                        except OSError:
-                            pass
+                    for r in carved:
+                        r["scope"] = "device"
+                    # FullTrust is package-wide: only rows whose device_id is this folder's GUID.
+                    for r in ft_carved:
+                        if owns_ft_row(r.get("device_id"), label):
+                            ft_attributed.add(id(r))
+                            carved.append(dict(r, scope="device (FullTrust device_id = folder GUID)"))
+                    if ft_carve_error:
+                        warnings.append(ft_carve_error + " - this device's carved streamed-app rows "
+                                        "may be missing.")
                     dl = sum(1 for r in carved if r.get("status") != "also_live")
                     if carved:
                         warnings.append("Carved %d candidate record(s) from dead space, %d not present "
@@ -911,8 +1156,8 @@ def main():
             gone = []
             for n, pth in dbs.items():
                 gone.extend(deleted_evidence(pth, n))
-            if ft_work:
-                gone.extend(deleted_evidence(ft_work, "FullTrust/phone_apps.db"))
+            # FullTrust's sqlite_sequence counter is shared by every device: it cannot be
+            # split by device, so it is reported once, in _package, never per device.
             d["deleted_evidence"] = gone
             for g in gone:
                 if g["classification"] == "churn-or-deletion":
@@ -968,16 +1213,20 @@ def main():
                                 seen_c.add(k); cols.append(k)
                     write_csv(os.path.join(cdir, "carved_%s.csv" % t), rows, cols)
 
+            dev_meta, other_meta = device_metadata(label, meta_entries, meta_error, meta_src)
             with open(os.path.join(outdir, "acquisition.json"), "w", encoding="utf-8") as fh:
                 json.dump({"tool": TOOL, "version": VERSION,
                            "generated_utc": datetime.now(timezone.utc).isoformat(),
                            "source": src, "device_label": label,
-                           "match_digits": a.digits, "files": acq, "health": health,
+                           "match_digits": a.digits, "files": acq,
+                           # package-wide inputs this device's results also depend on
+                           "package_files": pkg_acq, "health": health,
                            "warnings": warnings, "counts": counts,
-                           "device_metadata": meta}, fh, indent=2, default=str)
+                           "device_metadata": dev_meta,
+                           "package_metadata_other_entries": other_meta}, fh, indent=2, default=str)
 
-            html_report(os.path.join(outdir, "report.html"), a.case, label, meta,
-                        acq, health, d, tl, counts, a.digits, warnings)
+            html_report(os.path.join(outdir, "report.html"), a.case, label, (dev_meta, other_meta),
+                        acq + pkg_acq, health, d, tl, counts, a.digits, warnings)
 
             print("[%s]" % label)
             for k, v in counts.items():
@@ -991,6 +1240,10 @@ def main():
                 print("    staged copies kept at %s" % work)
             else:
                 shutil.rmtree(work, ignore_errors=True)
+
+    if ft_src or meta_src:
+        write_package(a, pkg_acq, pkg_warnings, devs, ft_work, ft_carved, ft_attributed,
+                      ft_carve_stats, ft_gone, meta_entries)
 
     if not summary:
         print("\nNothing parsed.")
