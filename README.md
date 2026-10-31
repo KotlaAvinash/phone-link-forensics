@@ -147,8 +147,8 @@ Every phone that has ever been linked to the PC through Phone Link, **including 
 
 | View | Source | What it shows |
 |---|---|---|
-| Phone pairings | `LocalCache\Indexed\<GUID>\` | One row per pairing, oldest first. The folder's creation time is when that phone was linked. Status: *data present* / *data in other tables* (rows only in tables the viewer does not know; the tables are named in Detail as `table: rows`, and Phone Link's own bookkeeping tables are not counted) / *databases present but empty* / *unreadable database* / *files present but no databases* / *folder only - its data was removed*. Also: databases left, row counts, first/last activity, SIM, apps streamed |
-| Phone details | `LocalCache\DeviceMetadataStorage.json` | Per hardware ID: display name, manufacturer, model, Android version, Phone Link app version, capabilities, linked/enabled, registration and last-seen times. A hardware ID without details is a phone that was unlinked |
+| Phone pairings | `LocalCache\Indexed\<GUID>\` | One row per pairing, in order of folder creation. The folder creation time is shown as read: it reflects the pairing only if the folders' timestamps were preserved when collected. If they look like copy times (a folder created after the files inside it were last modified, or after the folder itself was, all folders created within a second, or all created after every metadata time), a warning is shown and the folder times are not used as pairing times or for matching. Status: *data present* / *data in other tables* (rows only in tables the viewer does not know; the tables are named in Detail as `table: rows`, and Phone Link's own bookkeeping tables are not counted) / *databases present but empty* / *unreadable database* / *files present but no databases* / *folder only - its data was removed*. Also: databases left, row counts, first/last activity, SIM, apps streamed |
+| Linked devices | `LocalCache\DeviceMetadataStorage.json` | Per hardware ID: Kind (phone / this or another Windows PC / empty placeholder, from the OS name - the file also lists the PC itself), display name, manufacturer, model, OS version, Phone Link app version, capabilities, linked/enabled, registration and last-seen times. A hardware ID with no entries is shown as a placeholder row: its details were removed or never stored |
 | Trust relationships | `LocalCache\YppCryptoTrustRelationships` | Partner device, trust type, last access, key expiry, Microsoft account ID (MsaCid) |
 | Apps streamed per device | `LocalCache\Indexed\FullTrust\phone_apps.db` | `hosted_app_ids`: one row per app a phone streamed to the PC |
 | Pairing history | all of the above | Every linked-phone event in time order |
@@ -157,7 +157,7 @@ Every phone that has ever been linked to the PC through Phone Link, **including 
 How they connect:
 - **Stored:** a trust relationship's partner ID is `<prefix>_<metadata Id>`.
 - **Stored:** `hosted_app_ids.device_id` is the pairing folder's name.
-- **Inferred by time:** the phone details are matched to the closest pairing folder created within 10 minutes after registration.
+- **Inferred by time:** a phone's details are matched to the closest pairing folder created within 10 minutes after registration. Windows PC entries and entries without a phone OS are never matched, and nothing is matched when the folder times look like copy times. The match must be one-to-one: if a phone has several such folders, or a folder several such phones, all candidates are listed as ambiguous and none is linked.
 
 ### Phone connections: USB cable and Bluetooth (this PC)
 
@@ -216,7 +216,7 @@ All under `%LOCALAPPDATA%\Packages\Microsoft.YourPhone_8wekyb3d8bbwe\LocalCache\
 
 | Location | What is stored |
 |---|---|
-| `Indexed\<GUID>\System\Database\` | One folder per linked phone, with its databases. The folder's creation time is when the phone was linked |
+| `Indexed\<GUID>\System\Database\` | One folder per linked phone, with its databases. The folder's creation time reflects when the phone was linked only if the folders' timestamps were preserved when collected |
 | `DeviceMetadataStorage.json` | Phone name, maker, model, Android version, linked and last-seen times |
 | `YppCryptoTrustRelationships` | Trust with the phone: last access, key expiry, Microsoft account ID |
 | `Indexed\FullTrust\phone_apps.db` | Apps the phone streamed to the PC |

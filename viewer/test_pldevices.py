@@ -3,9 +3,11 @@
     python test_pldevices.py
 """
 import calendar
+import datetime
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import sys
@@ -267,6 +269,302 @@ class BadSources(unittest.TestCase):
             self.assertEqual(w.left(), [])
 
 
+OLD = calendar.timegm((2026, 3, 1, 9, 0, 0))     # a time well before any test run
+
+
+def age_tree(root, start=OLD):
+    """Give every file and folder under root an old modification time, as on a phone linked months ago."""
+    n = 0
+    for dirpath, dirs, files in os.walk(root, topdown=False):
+        for name in files + dirs:
+            n += 1
+            os.utime(os.path.join(dirpath, name), (start + n * 60, start + n * 60))
+
+
+def copy_reversed(src_lc, dst_lc):
+    """Copy a LocalCache the way an examiner's file copy does: new creation times, the newest folder first."""
+    os.makedirs(os.path.join(dst_lc, "Indexed"))
+    for name in os.listdir(src_lc):
+        if os.path.isfile(os.path.join(src_lc, name)):
+            shutil.copy2(os.path.join(src_lc, name), os.path.join(dst_lc, name))
+    for name in sorted(os.listdir(os.path.join(src_lc, "Indexed")), reverse=True):
+        shutil.copytree(os.path.join(src_lc, "Indexed", name), os.path.join(dst_lc, "Indexed", name))
+
+
+class FolderTimeCheck(unittest.TestCase):
+    """The heuristics that decide whether folder creation times are copy times. Times are injected."""
+    T = calendar.timegm((2026, 9, 1, 12, 0, 0))
+
+    def check(self, folders, meta_times=()):
+        return D._time_check(folders, list(meta_times))
+
+    def f(self, created, modified=None, newest=None):
+        return {"created": created, "modified": created if modified is None else modified,
+                "newest_file": newest, "files": []}
+
+    def test_consistent_live_times_raise_no_warning(self):
+        warn, notes = self.check({G[0]: self.f(self.T, newest=self.T + 3600),
+                                  G[1]: self.f(self.T + 86400, self.T + 86400 + 5),
+                                  G[2]: self.f(self.T + 90000, newest=self.T + 99999)},
+                                 [self.T - 5, self.T + 90000 + 100])
+        self.assertEqual(warn, "")
+        self.assertFalse(any(notes.values()), notes)
+
+    def test_created_after_the_newest_file_inside(self):
+        warn, notes = self.check({G[0]: self.f(self.T + 86400, newest=self.T),
+                                  G[1]: self.f(self.T, newest=self.T + 10)})
+        self.assertIn("newest file", warn)
+        self.assertIn("newest file", notes[G[0]])
+        self.assertEqual(notes[G[1]], "")
+
+    def test_created_after_the_folder_was_last_modified(self):
+        warn, notes = self.check({G[0]: self.f(self.T + 86400, modified=self.T),
+                                  G[1]: self.f(self.T + 999999)})
+        self.assertIn("last modified", warn)
+        self.assertIn("last modified", notes[G[0]])
+
+    def test_all_folders_created_together(self):
+        warn, _ = self.check({G[0]: self.f(self.T), G[1]: self.f(self.T + 0.4), G[2]: self.f(self.T + 0.8)})
+        self.assertIn("within", warn)
+        self.assertEqual(self.check({G[0]: self.f(self.T)})[0], "")      # one folder alone proves nothing
+
+    def test_all_folders_created_after_every_metadata_time(self):
+        warn, _ = self.check({G[0]: self.f(self.T + 86400), G[1]: self.f(self.T + 2 * 86400)}, [self.T, self.T + 60])
+        self.assertIn("metadata", warn)
+        self.assertEqual(self.check({G[0]: self.f(self.T + 86400), G[1]: self.f(self.T + 2 * 86400)},
+                                    [self.T, self.T + 86400 - 30])[0], "")   # a phone registered just before one
+
+
+class CopyTimeEvidence(unittest.TestCase):
+    """An evidence copy made by Explorer or copytree: folder creation times are the copy time, not the pairing time."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        src = D.find_localcache(pldemo.build_package(os.path.join(cls.tmp.name, "src")))
+        age_tree(os.path.join(src, "Indexed"))
+        cls.lc = os.path.join(cls.tmp.name, "copy", "LocalCache")
+        copy_reversed(src, cls.lc)
+        cls.g = R.Graph()
+        with WorkFolders():
+            _, pc = D.build(cls.lc, cls.g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_warning_is_shown(self):
+        for vid in ("PC_devices", "PR3", "PR4"):
+            self.assertIn("look like the time the evidence was copied", self.g.views[vid].basis, vid)
+
+    def test_no_phone_linked_events_from_folder_times(self):
+        events = [r["Event"] for r in self.g.views["PR4"].rows]
+        self.assertFalse([e for e in events if "linked" in e or "folder created" in e], events)
+        self.assertTrue(any("registered" in e for e in events), events)   # metadata times are still history
+
+    def test_no_time_matches(self):
+        self.assertEqual(self.g.views["PR3"].rows, [])
+        for r in self.g.views["PC_phones"].rows:
+            if "_e" in r:
+                self.assertEqual([t for rid, t, _ in self.g.links(r["_e"]) if rid == "PR3"], [])
+
+    def test_numbering_does_not_claim_pairing_order(self):
+        rows = self.g.views["PC_devices"].rows
+        self.assertEqual(len(rows), 3)
+        for r in rows:
+            self.assertIn("not pairing order", self.g.label[r["_e"]])
+            self.assertTrue(r["TimeCheck"].startswith("looks like copy time"), r)
+            self.assertNotIn(r["_e"], self.g.time)          # an unreliable time is not used for "close together"
+
+
+T0 = calendar.timegm((2026, 9, 1, 12, 0, 0))
+
+
+def at(ts):
+    """Epoch seconds -> the metadata's ISO form."""
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
+def entry(mid, name, os_name, reg, os_version="1"):
+    return {"IsLinked": True, "Metadata": {"Id": mid, "RegitrationTime": at(reg), "LastSeenTime": at(reg + 30),
+                                           "Metadata": {"DisplayName": name, "OsName": os_name, "OsVersion": os_version}}}
+
+
+def build_with_folder_times(meta, created):
+    """Build from a synthetic package whose pairing folders read as created at created[guid] (injected, live-style:
+    the folder's modified time equals its creation time and its files are newer)."""
+    folders = [(guid, {"System/Database/phone.db": [("CREATE TABLE message (id INTEGER, timestamp INTEGER)", [])]})
+               for guid in created]
+    with WorkFolders(), tempfile.TemporaryDirectory() as tmp:
+        lc = make_pkg(tmp, meta=meta, folders=folders)
+
+        def times(path):
+            t = created[os.path.basename(path)]
+            return t, t
+
+        with mock.patch.object(D, "_folder_times", times):
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+        pc.close()
+    return g
+
+
+def pr3_links(g):
+    return [(a, b) for a in list(g.label) if a[0] == "phone" for rid, b, _ in g.links(a) if rid == "PR3"]
+
+
+class DeviceKinds(unittest.TestCase):
+    """DeviceMetadataStorage.json lists this PC (or another Windows companion) as well as phones."""
+
+    def test_windows_entry_is_a_pc_never_matched_by_time_never_called_phone(self):
+        meta = {"DeviceMetadatas": {"HWPC": [entry("pc-1", "MYPC", "Windows", T0, "10.0.26200")]}}
+        g = build_with_folder_times(meta, {G[0]: T0 + 75})     # the PC registered 75 s before the phone's folder
+        row = g.views["PC_phones"].rows[0]
+        self.assertIn("Windows PC", row["Kind"])
+        label = g.label[row["_e"]]
+        self.assertFalse(label.lower().startswith("phone"), label)
+        self.assertIn("not a phone", label)
+        self.assertEqual(g.views["PR3"].rows, [])
+        self.assertEqual(pr3_links(g), [])
+        for r in g.views["PR4"].rows:
+            if "MYPC" in r["Detail"]:
+                self.assertNotIn("phone", r["Event"].lower(), r)
+                self.assertTrue(r["Event"].startswith("Windows PC"), r)
+
+    def test_same_times_with_an_android_phone_are_matched(self):
+        # control for the test above: the timing alone would have matched
+        meta = {"DeviceMetadatas": {"HW1": [entry("ph-1", "P1", "Android", T0)]}}
+        g = build_with_folder_times(meta, {G[0]: T0 + 75})
+        self.assertEqual(g.views["PC_phones"].rows[0]["Kind"], "phone")
+        self.assertEqual(len(g.views["PR3"].rows), 1)
+
+    def test_entry_without_an_os_is_not_called_a_phone_or_matched(self):
+        e = entry("x-1", "Thing", None, T0)
+        del e["Metadata"]["Metadata"]["OsName"]
+        g = build_with_folder_times({"DeviceMetadatas": {"HWX": [e]}}, {G[0]: T0 + 75})
+        row = g.views["PC_phones"].rows[0]
+        self.assertIn("OS not recorded", row["Kind"])
+        self.assertFalse(g.label[row["_e"]].lower().startswith("phone"))
+        self.assertEqual(g.views["PR3"].rows, [])
+
+    def test_view_does_not_promise_phone_details(self):
+        g = build_with_folder_times({"DeviceMetadatas": {"HWPC": [entry("pc-1", "MYPC", "Windows", T0)]}}, {})
+        v = g.views["PC_phones"]
+        self.assertEqual(v.title, "Linked devices (DeviceMetadataStorage.json)")
+        self.assertNotIn("make, model, Android", v.basis)
+        self.assertIn("Kind", v.cols)
+
+    def test_empty_hardware_id_list_is_an_explicit_placeholder_row(self):
+        g = build_with_folder_times({"DeviceMetadatas": {"": [], "HW9": []}}, {})
+        rows = g.views["PC_phones"].rows
+        self.assertEqual(len(rows), 2)
+        for r in rows:
+            self.assertEqual(r["Kind"], "empty placeholder - no entries")
+            self.assertTrue(all(r.get(c) is not None for c in g.views["PC_phones"].cols), r)
+            self.assertNotIn("None", " ".join(str(r[c]) for c in g.views["PC_phones"].cols))
+            self.assertFalse(g.label[r["_e"]].lower().startswith("phone"), g.label[r["_e"]])
+        self.assertIn("(empty)", [r["HardwareID"] for r in rows])
+
+
+class AmbiguousTimeMatch(unittest.TestCase):
+    """The time match must be one-to-one; anything else is listed as ambiguous and not linked."""
+
+    def test_two_phones_near_one_folder_are_ambiguous(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry("ph-1", "P1", "Android", T0 - 240)],
+                                    "HW2": [entry("ph-2", "P2", "Android", T0 - 120)]}}
+        g = build_with_folder_times(meta, {G[0]: T0})
+        self.assertEqual(pr3_links(g), [])
+        rows = g.views["PR3"].rows
+        self.assertEqual(sorted(r["Phone"] for r in rows), ["phone P1", "phone P2"])
+        for r in rows:
+            self.assertTrue(r["Basis"].startswith("AMBIGUOUS"), r)
+            self.assertIn("2 phones", r["Basis"])
+
+    def test_one_phone_near_two_folders_is_ambiguous(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry("ph-1", "P1", "Android", T0)]}}
+        g = build_with_folder_times(meta, {G[0]: T0 + 60, G[1]: T0 + 180})
+        self.assertEqual(pr3_links(g), [])
+        rows = g.views["PR3"].rows
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["Basis"].startswith("AMBIGUOUS") and "2 folders" in r["Basis"] for r in rows), rows)
+
+    def test_separate_pairings_each_match_their_own_folder(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry("ph-1", "P1", "Android", T0)],
+                                    "HW2": [entry("ph-2", "P2", "Android", T0 + 86400)]}}
+        g = build_with_folder_times(meta, {G[0]: T0 + 60, G[1]: T0 + 86460})
+        self.assertEqual(sorted((a[1], b[1]) for a, b in pr3_links(g)), [("ph-1", G[0]), ("ph-2", G[1])])
+        self.assertTrue(all(r["Basis"].startswith("inferred") for r in g.views["PR3"].rows))
+
+
+class SourceChangesDuringCopy(unittest.TestCase):
+    """A live package keeps writing: one moving file must not throw away the whole linked-phones section."""
+    META = {"DeviceMetadatas": {"HW1": [{"IsLinked": True, "Metadata": {"Id": "id-1", "Metadata": {
+        "DisplayName": "P1", "OsName": "Android"}}}]}}
+
+    def test_file_changing_during_copy_is_marked_and_the_section_is_still_built(self):
+        with WorkFolders() as w, tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, meta=self.META, folders=[BadSources.OK_FOLDER, (G[1], {"notes.txt": b"hello"})])
+            real = D.shutil.copy2
+
+            def growing(a, b, *x, **k):
+                out = real(a, b, *x, **k)
+                if a.endswith("notes.txt"):          # the source is written to while it is being copied
+                    with open(a, "ab") as f:
+                        f.write(b"more")
+                return out
+
+            with mock.patch.object(D.shutil, "copy2", growing):
+                g = R.Graph()
+                _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+            self.assertEqual(w.left(), [])
+        rows = {r["file"]: r for r in g.views["PC_copies"].rows}
+        moving = next(r for f, r in rows.items() if f.endswith("notes.txt"))
+        self.assertEqual(moving["copy_matches"], "n/a - source changed during copy")
+        self.assertEqual(moving["source_sha256"], "")
+        self.assertTrue(moving["copy_sha256"])
+        self.assertTrue(all(r["copy_matches"] == "yes" for f, r in rows.items() if not f.endswith("notes.txt")))
+        self.assertEqual(len(g.views["PC_devices"].rows), 2)
+        self.assertEqual(len(g.views["PC_phones"].rows), 1)
+        for vid in ("PC_copies", "PC_devices"):
+            self.assertIn("changed while it was being copied", g.views[vid].basis, vid)
+            self.assertIn("notes.txt", g.views[vid].basis, vid)
+
+    def test_unreadable_source_is_an_error_row_not_an_error_section(self):
+        real = D._sha
+
+        def sha(path):
+            if path.endswith("notes.txt") and "pldevices-" not in path:
+                raise PermissionError(13, "locked")
+            return real(path)
+
+        with WorkFolders() as w, tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, meta=self.META, folders=[BadSources.OK_FOLDER, (G[1], {"notes.txt": b"hello"})])
+            with mock.patch.object(D, "_sha", sha):
+                g = R.Graph()
+                _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+            self.assertEqual(w.left(), [])
+        bad = next(r for r in g.views["PC_copies"].rows if r["file"].endswith("notes.txt"))
+        self.assertIn("source could not be read", bad["copy_matches"])
+        self.assertEqual(len(g.views["PC_devices"].rows), 2)
+        self.assertIn("could not be read", g.views["PC_devices"].basis)
+
+    def test_copy_that_differs_from_a_settled_source_still_fails(self):
+        real = D._sha
+
+        def sha(path):
+            return "0" * 64 if "pldevices-" in path else real(path)   # every copy reads back wrong
+
+        with WorkFolders() as w, tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, meta=self.META, folders=[BadSources.OK_FOLDER])
+            with mock.patch.object(D, "_sha", sha):
+                with self.assertRaises(IOError):
+                    D.PackageCopy(lc)
+            self.assertEqual(w.left(), [])
+
+
 class Links(unittest.TestCase):
     def link(self, target, link):
         try:
@@ -325,7 +623,7 @@ class LastSeenInHistory(unittest.TestCase):
     def test_last_seen_event_is_in_the_history_with_its_utc_time(self):
         meta = {"DeviceMetadatas": {"HW1": [{"Metadata": {
             "Id": "id-1", "RegistrationTime": "2026-09-21T17:00:00+05:30",
-            "LastSeenTime": "2026-09-21T17:17:49+05:30", "Metadata": {"DisplayName": "P1"}}}]}}
+            "LastSeenTime": "2026-09-21T17:17:49+05:30", "Metadata": {"DisplayName": "P1", "OsName": "Android"}}}]}}
         with tempfile.TemporaryDirectory() as tmp:
             lc = make_pkg(tmp, meta=meta)
             g = R.Graph()
@@ -421,7 +719,21 @@ class LinkedPhones(unittest.TestCase):
     def test_history_in_time_order(self):
         t = [r["TimeUTC"] for r in self.rows("PR4")]
         self.assertEqual(t, sorted(t))
-        self.assertEqual(sum(1 for r in self.rows("PR4") if r["Event"].startswith("phone linked")), 3)
+        folder = [r["Event"] for r in self.rows("PR4") if r["Event"].startswith("pairing folder created")]
+        self.assertEqual(len(folder), 3)
+        self.assertTrue(all("if the folder times were preserved" in e for e in folder), folder)
+
+    def test_live_folder_times_raise_no_copy_warning(self):
+        for vid in ("PC_devices", "PR3", "PR4"):
+            self.assertNotIn("WARNING", self.g.views[vid].basis, vid)
+        self.assertTrue(all(r["TimeCheck"] == "no sign of copy time" for r in self.rows("PC_devices")))
+        self.assertTrue(all(r["_e"] in self.g.time for r in self.rows("PC_devices")))
+
+    def test_folder_creation_time_is_worded_as_read(self):
+        basis = self.g.views["PC_devices"].basis
+        self.assertIn("folder creation time as read", basis)
+        self.assertIn("reflects the pairing only if the folders' timestamps were preserved when collected", basis)
+        self.assertNotIn("= when that phone was linked", basis)
 
     def test_close_removes_copies(self):
         g = R.Graph()
