@@ -136,7 +136,7 @@ NAV = {  # view -> (group, sub-heading or None, name in the list)
     "NR4": ("overview", None, "Check: notification columns vs stored data"),
     # this PC: linked phones
     "PC_devices": ("linked", None, "Phone pairings"),
-    "PC_phones": ("linked", None, "Phone details (make, model, Android)"),
+    "PC_phones": ("linked", None, "Linked devices (phones and PCs)"),
     "PC_trust": ("linked", None, "Trusted connections"),
     "PC_streamed": ("linked", None, "Apps streamed to this PC"),
     "PR4": ("linked", None, "Pairing history"),

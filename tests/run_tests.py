@@ -210,7 +210,7 @@ def compare(res, expected, label, maps):
 
         def cell(r, c):
             v = r.get(c, '<missing>')
-            return ''.join(sorted(re.split(r', | \| ', v))) if c in lists else v
+            return '\x1f'.join(sorted(re.split(r', | \| ', v))) if c in lists else v
         if exp['rows']:
             have_cols = res.get('columns', {}).get(key, [])
             check(sorted(have_cols) == sorted(cols), f'{label} {key[1]}: output columns are exactly the expected set '
