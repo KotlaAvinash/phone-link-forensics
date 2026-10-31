@@ -1,5 +1,7 @@
 name: tests
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   test:
     # Phone Link and the artifacts this tool reads exist only on Windows, so the tests run on Windows.
@@ -9,17 +11,29 @@ jobs:
         shell: bash
     env:
       PYTHONIOENCODING: utf-8
+      # Upstream SQLECmd maps for the cross-match test, pinned so upstream changes cannot silently change
+      # (or disable) what CI tests. To bump: run
+      #   git ls-remote https://github.com/EricZimmerman/SQLECmd.git HEAD
+      # put the new SHA here, and check that tests/run_tests.py --upstream-maps still passes.
+      SQLECMD_SHA: c67634af503bd53777689998f1d9e3c0b4e2fdff
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install
         run: pip install pyyaml yamllint
       - name: yamllint (upstream SQLECmd rules)
         run: yamllint -c .yamllint maps
-      - name: Upstream maps for the cross-match test
-        run: git clone --depth 1 https://github.com/EricZimmerman/SQLECmd.git upstream
+      - name: Upstream maps for the cross-match test (pinned SQLECmd commit)
+        run: |
+          git init upstream
+          git -C upstream fetch --depth 1 https://github.com/EricZimmerman/SQLECmd.git "$SQLECMD_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+      - name: Test-harness honesty tests
+        run: python tests/test_run_tests.py
+        env:
+          PL_UPSTREAM_MAPS: upstream/SQLMap/Maps
       - name: Synthetic answer-key tests
         run: python tests/run_tests.py --upstream-maps upstream/SQLMap/Maps
       - name: Viewer relation tests

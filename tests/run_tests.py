@@ -1,8 +1,13 @@
 """Test the maps against synthetic Phone Link databases with a known answer key.
 
-    python tests/run_tests.py                              # emulator only (CI)
+    python tests/run_tests.py                              # emulator only; cross-match reported as SKIP
     python tests/run_tests.py --sqlecmd C:\\Tools\\SQLECmd.exe  # also the real SQLECmd
     python tests/run_tests.py --upstream-maps <dir>        # also check no upstream map cross-matches
+                                                           # (CI: <dir> = SQLMap/Maps of a pinned SQLECmd clone)
+
+A check that was not run is printed as [SKIP] and counted on the RESULT line; it is never a pass.
+When --upstream-maps is given, the folder must exist and hold at least MIN_UPSTREAM_MAPS maps,
+otherwise the cross-match FAILS instead of quietly testing only this repo's maps.
 
 The emulator follows SQLECmd's rules: a map applies when IdentifyQuery's result equals
 IdentifyValue as a string, and blob files are named
@@ -29,7 +34,14 @@ import fixtures  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAPS = os.path.join(ROOT, 'maps')
 INVALID = set('"<>|:*?\\/') | {chr(i) for i in range(32)}
+REQUIRED_KEYS = ('Description', 'Author', 'Email', 'Id', 'Version', 'CSVPrefix', 'FileName', 'IdentifyQuery',
+                 'IdentifyValue', 'Queries')
+REQUIRED_QUERY_KEYS = ('Name', 'Query', 'BaseFileName')
+# SQLECmd's SQLMap/Maps folder holds over 90 maps. Fewer than this means the --upstream-maps path is wrong
+# or upstream reorganised its maps; the cross-match would then test (almost) nothing, so it fails instead.
+MIN_UPSTREAM_MAPS = 50
 FAILS = []
+SKIPS = []
 
 
 def check(ok, label):
@@ -38,12 +50,41 @@ def check(ok, label):
         FAILS.append(label)
 
 
+def skip(label):
+    print(f'  [SKIP] {label}')
+    SKIPS.append(label)
+
+
 def load_maps(folder):
+    """{file name: parsed map}; a file that cannot be read or parsed maps to the exception instead."""
     out = {}
     for p in sorted(glob.glob(os.path.join(folder, '*.smap'))):
-        with open(p, encoding='utf-8') as fh:
-            out[os.path.basename(p)] = yaml.safe_load(fh)
+        try:
+            with open(p, encoding='utf-8') as fh:
+                out[os.path.basename(p)] = yaml.safe_load(fh)
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+            out[os.path.basename(p)] = e
     return out
+
+
+def map_problems(m):
+    """Structural problems that stop a map from being used at all (empty list: usable)."""
+    if isinstance(m, Exception):
+        first = str(m).splitlines()[0] if str(m) else ''
+        return [f'unreadable ({type(m).__name__}: {first})']
+    if not isinstance(m, dict):
+        return ['not a YAML mapping']
+    probs = [f'missing key {k}' for k in REQUIRED_KEYS if k not in m]
+    if 'Queries' in m:
+        if not isinstance(m['Queries'], list) or not m['Queries']:
+            probs.append('Queries is not a non-empty list')
+        else:
+            for i, q in enumerate(m['Queries']):
+                if not isinstance(q, dict):
+                    probs.append(f'Queries[{i}] is not a mapping')
+                    continue
+                probs += [f'Queries[{i}] missing key {k}' for k in REQUIRED_QUERY_KEYS if k not in q]
+    return probs
 
 
 def sanitize(value, max_len=50):
@@ -216,17 +257,64 @@ def scenario(name, builder, engine, maps, expect_matches, **kw):
 
 
 def static_checks(maps):
+    """Check every map; return the structurally usable ones (the engines run on those only)."""
     print('== static checks')
-    ids = [m['Id'] for m in maps.values()]
-    check(len(ids) == len(set(ids)), 'map Ids are unique')
+    check(bool(maps), f'map folder holds at least one .smap ({len(maps)} found)')
+    usable = {}
     for n, m in maps.items():
-        for k in ('Description', 'Author', 'Email', 'Id', 'Version', 'CSVPrefix', 'FileName', 'IdentifyQuery', 'IdentifyValue', 'Queries'):
-            if k not in m:
-                check(False, f'{n}: has {k}')
+        probs = map_problems(m)
+        for pr in probs:
+            check(False, f'{n}: {pr}')
+        if not probs:
+            check(True, f'{n}: every required key present')
+            usable[n] = m
+    ids = [m['Id'] for m in usable.values()]
+    check(len(ids) == len(set(ids)), 'map Ids are unique')
+    for n, m in usable.items():
         check(isinstance(m['Version'], (int, float)), f'{n}: Version is numeric')
         check('YOUR_' not in yaml.safe_dump(m), f'{n}: no placeholder text')
         for q in m['Queries']:
             check(bool(q.get('Name')) and bool(q.get('BaseFileName')), f"{n}/{q.get('BaseFileName')}: Name and BaseFileName set")
+    return usable
+
+
+def cross_match(upstream_dir, own):
+    """Every synthetic database must match exactly one map out of upstream's maps plus ours.
+
+    A map of ours replaces the upstream map with the same file name, as it does when it is
+    copied into SQLECmd's Maps folder."""
+    print('== cross-match against upstream maps')
+    where = f"upstream maps folder '{upstream_dir}'"
+    if not os.path.exists(upstream_dir):
+        check(False, f'{where} does not exist (found 0 .smap files, need at least {MIN_UPSTREAM_MAPS})')
+        return
+    if not os.path.isdir(upstream_dir):
+        check(False, f'{where} is not a directory (found 0 .smap files, need at least {MIN_UPSTREAM_MAPS})')
+        return
+    upstream = load_maps(upstream_dir)
+    if len(upstream) < MIN_UPSTREAM_MAPS:
+        check(False, f'{where} has too few maps: found {len(upstream)} .smap files, need at least {MIN_UPSTREAM_MAPS}')
+        return
+    broken = {n: map_problems(m) for n, m in upstream.items() if map_problems(m)}
+    check(not broken, f'every upstream map is readable and complete ({len(broken)} not'
+                      f'{": " if broken else ""}{"; ".join(f"{n}: {p[0]}" for n, p in sorted(broken.items())[:5])})')
+    replaced = sorted(set(upstream) & set(own))
+    allmaps = {n: m for n, m in upstream.items() if n not in broken}
+    allmaps.update(own)
+    print(f'  loaded {len(upstream)} upstream maps from {upstream_dir}; {len(replaced)} replaced by ours '
+          f'(same file name: {", ".join(replaced) or "none"}); {len(allmaps)} maps in the cross-match')
+    check(len(allmaps) > len(own), f'the cross-match map set ({len(allmaps)}) is larger than our own maps ({len(own)})')
+    tmp = tempfile.mkdtemp(prefix='pl_cross_')
+    try:
+        fixtures.build_current(tmp)
+        res = run_emulator(tmp, allmaps)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    per_db = Counter(f for f, _ in res['matches'])
+    multi = {f: sorted(m for g, m in res['matches'] if g == f) for f, v in per_db.items() if v != 1}
+    check(all(v == 1 for v in per_db.values()) and len(per_db) == 5,
+          f'each synthetic database matches exactly one map out of {len(allmaps)} ({dict(per_db)}'
+          f'{f"; more than one: {multi}" if multi else ""})')
 
 
 def main():
@@ -236,8 +324,7 @@ def main():
     ap.add_argument('--maps', default=MAPS, help='map folder to test (default: ./maps)')
     args = ap.parse_args()
     maps_dir = args.maps
-    maps = load_maps(maps_dir)
-    static_checks(maps)
+    maps = static_checks(load_maps(maps_dir))
 
     current = {(f, m) for f, m in [('calling.db', fixtures.M_CALL), ('photos.db', fixtures.M_PHOTO),
                                    ('phoneapps.db', fixtures.M_APPS), ('continuity.db', fixtures.M_CONT),
@@ -245,6 +332,9 @@ def main():
     engines = [('emulator', lambda d: run_emulator(d, maps))]
     if args.sqlecmd:
         engines.append(('sqlecmd', lambda d: run_sqlecmd(args.sqlecmd, d, maps_dir, maps)))
+    else:
+        print('== engine: sqlecmd')
+        skip('real SQLECmd engine (no --sqlecmd given)')
     for ename, eng in engines:
         print(f'== engine: {ename}')
         scenario('current', fixtures.build_current, eng, maps, current)
@@ -253,26 +343,17 @@ def main():
         scenario('legacy-photos', fixtures.build_legacy_photos, eng, maps, {('photos.db', fixtures.M_PHOTO)})
         scenario('negatives', fixtures.build_negatives, eng, maps, set())
 
-    if args.upstream_maps:
+    if args.upstream_maps is None:
         print('== cross-match against upstream maps')
-        both = tempfile.mkdtemp(prefix='maps_all_')
-        for p in glob.glob(os.path.join(args.upstream_maps, '*.smap')):
-            shutil.copy(p, both)
-        for p in glob.glob(os.path.join(maps_dir, '*.smap')):
-            shutil.copy(p, both)
-        allmaps = load_maps(both)
-        tmp = tempfile.mkdtemp(prefix='pl_cross_')
-        fixtures.build_current(tmp)
-        res = run_emulator(tmp, allmaps)
-        per_db = Counter(f for f, _ in res['matches'])
-        check(all(v == 1 for v in per_db.values()) and len(per_db) == 5,
-              f'each synthetic database matches exactly one map out of {len(allmaps)} ({dict(per_db)})')
-        shutil.rmtree(tmp, ignore_errors=True)
-        shutil.rmtree(both, ignore_errors=True)
+        skip('cross-match against upstream maps (no --upstream-maps given)')
+    else:
+        cross_match(args.upstream_maps, maps)
 
-    print(f'\nRESULT: {len(FAILS)} failure(s)')
+    print(f'\nRESULT: {len(FAILS)} failure(s), {len(SKIPS)} skipped')
     for f in FAILS:
-        print('  -', f)
+        print('  - FAIL:', f)
+    for f in SKIPS:
+        print('  - SKIP:', f)
     sys.exit(1 if FAILS else 0)
 
 
