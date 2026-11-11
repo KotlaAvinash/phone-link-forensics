@@ -65,7 +65,7 @@ The **Contents** list on the left uses plain names grouped by topic, with each v
 
 ![phone.db relations](docs/images/07-phone-db-relations.png)
 
-**SQLECmd map output**: exactly what the SQLECmd maps return for the same database.
+**SQLECmd map output**: the maps' queries, run by the viewer on the same database (SQLECmd itself can convert some values differently; see *SQLECmd behaviours to know*).
 
 ![SQLECmd map output](docs/images/06-sqlecmd-map-output.png)
 
@@ -73,7 +73,7 @@ The **Contents** list on the left uses plain names grouped by topic, with each v
 
 ## Quick start
 
-Requirements: **Python 3.8+** on Windows (Tkinter ships with Python). Nothing to install for the viewer.
+Requirements: **Python 3** on Windows (Tkinter ships with Python). Nothing to install for the viewer. CI tests **Python 3.12 on Windows only**. The code uses no syntax newer than Python 3.8, but other Python versions are not tested.
 
 ```bash
 # 1. Try it on synthetic data - nothing real is read
@@ -103,7 +103,7 @@ That folder holds `phone.db` (SMS, MMS, RCS), `calling.db` (calls), `contacts.db
 
 ### How evidence is handled
 
-- **Copies only.** The input folder is copied to a temporary folder first: every `.db` with its `-wal` and `-shm`, plus the package files for *Linked phones*.
+- **Copies only.** The input folder is copied to a temporary folder first: every `.db` with its `-wal` and `-shm`, plus the package files for *Linked phones*. The copies go to new `plrelate-*` and `pldevices-*` folders in Python's temp folder (the first of `TMPDIR`, `TEMP`, `TMP` that is set, normally `%LOCALAPPDATA%\Temp` on the system drive). To keep them off a drive you are examining, point `TEMP` at a folder on an external drive before starting (and leave `TMPDIR` unset, or set it to the same folder): `set TEMP=E:\plwork`.
 - **A steady snapshot.** A live database can change while its `.db`, `-wal` and `-shm` are copied one after another. The `.db` and `-wal` are hashed before and after each set, and a set that changed is copied again (up to 3 tries). A source that never settles is still loaded, with a warning in the status bar, because a busy live source cannot be frozen without administrator rights. Its rows in **Copies and hashes** say `source changed during copy`, show no source hash (there is none to claim) and give the copy's own hash instead. Treat that copy as possibly mixing two moments.
 - **Every copy of a steady source is re-hashed (SHA-256) against its source.** A mismatch stops the load, and the bad copy is removed.
 - **Read-only.** Copies are opened with SQLite `mode=ro` and `query_only`. The source folder is never opened by SQLite.
@@ -111,7 +111,8 @@ That folder holds `phone.db` (SMS, MMS, RCS), `calling.db` (calls), `contacts.db
 - **Cleanup.** Copies are deleted when the window closes. If a copy cannot be removed, the viewer says so and shows the path. On start it reports copy folders left by earlier runs.
 - **Secrets are never read.** Not read: the Bluetooth link keys, `PlatformEncryptedKeyStorage.json` and certificate bodies (only counted).
 - **Folder links are not followed.** When the Phone Link package is copied, a symlink or junction is skipped, not followed, and is listed in **Linked-phone copies and hashes** as `skipped - symlink or junction, not followed`.
-- **Read-only access to the live PC.** The cable / Bluetooth section reads the live registry and logs, and changes nothing.
+- **Read-only access to the live PC.** The cable / Bluetooth section reads the live registry and logs (event logs through `wevtutil`) and writes nothing to them.
+- **Running on a suspect PC is live response.** The viewer never writes to the source files it copies (reading them can still update their last-access time where Windows records it), but running it on the machine under examination still changes that machine: the temporary copies are written to its temp folder (by default on the system drive, where new files can overwrite unallocated space that may still hold deleted data), and starting Python (and `wevtutil` for the cable / Bluetooth section) leaves Prefetch and other execution traces. Prefer collecting the Phone Link package first and running the viewer with `--input` on that collected copy, on your own workstation. If you must run it on the suspect PC, redirect `TEMP` to an external drive as above and record what you ran and when.
 
 ### The window
 
@@ -255,7 +256,7 @@ Phone Link deletes a notification when it is dismissed, so the live table is oft
 
 | View | What it shows |
 |---|---|
-| notifications | Live rows **and carved deleted rows** (Source = deleted, with page and offset). All 36 fields of the `json` column become columns. `flags`, `importance`, `priority` and the Android `key` (user / package / id / tag / uid) are decoded as the Android API defines them |
+| notifications | Live rows **and carved deleted rows** (Source = deleted, with page and offset). A fixed set of 32 top-level keys of the `json` column is read into columns; any other key is not a column but stays visible in the raw JSON shown under the selected row. `flags`, `importance`, `priority` and the Android `key` (user / package / id / tag / uid) are decoded as the Android API defines them |
 | chat messages | `messages[]` with `senderNames[]`: who wrote each message inside one notification |
 | buttons | `notificationActions[]`; *InlineReply* means the notification could be answered from the PC |
 | notification_toastmappings, phone_requests | Live and carved rows |
@@ -279,12 +280,12 @@ Relations between tables:
 
 The stock SQLECmd map set no longer parses some Phone Link databases and has no map at all for others.
 
-- **`photos.db` is silently skipped by the stock map.** Current Phone Link builds no longer have the `photo` table, so `Windows_YourPhone_PhotosDB.smap` v1.1 stops matching and SQLECmd lists the database as having no map. v1.2 here matches by the columns its query actually reads.
+- **`photos.db` is silently skipped by the stock map.** Current Phone Link builds no longer have the `photo` table, so `Windows_YourPhone_PhotosDB.smap` v1.1 stops matching and SQLECmd lists the database as having no map. v1.3 here matches by the columns its queries actually read (v1.2 fixed the match; v1.3 also checks the two blob columns).
 - **Four databases had no map:** `calling.db`, `continuity.db`, `phoneapps.db`, `deviceData.db`.
 
 | Map | Database | What you get |
 |---|---|---|
-| `Windows_YourPhone_PhotosDB.smap` (v1.2) | `photos.db` | Photo index with taken / seen / sync times; thumbnails exported as JPEG |
+| `Windows_YourPhone_PhotosDB.smap` (v1.3) | `photos.db` | Photo index with taken / seen / sync times; thumbnails exported as JPEG |
 | `Windows_YourPhone_CallingDB.smap` | `calling.db` | Calls: number, direction, start time, duration, SIM, read flag, raw times |
 | `Windows_YourPhone_ContinuityDB.smap` | `continuity.db` | Phone browser history offered to the PC; cross-device app context |
 | `Windows_YourPhone_PhoneAppsDB.smap` | `phoneapps.db` | Installed apps (icons as PNG), recent apps, Android ↔ Windows app links |
@@ -294,12 +295,13 @@ The stock maps for `contacts.db`, `phone.db`, `notifications.db` and `settings.d
 
 **Use**
 
-1. Copy the `.smap` files into SQLECmd's `Maps` folder, or point `--maps` at this repo's `maps` folder.
+1. Copy the five `.smap` files into SQLECmd's `Maps` folder. `Windows_YourPhone_PhotosDB.smap` overwrites the stock v1.1 map there by design (same file name and map Id). Do not point `--maps` at this repo's `maps` folder: SQLECmd then loads only these five maps, so `contacts.db`, `phone.db`, `notifications.db`, `settings.db` and every non-Phone Link database found by `--hunt` get no map.
 2. **Work on copies.** SQLECmd opens databases read-write and writes `-shm`/`-wal` files beside them. Collect each `.db` together with its `-wal` and `-shm`, because recent rows can exist only in the `-wal`.
 3. Run it:
    ```
-   SQLECmd.exe -d <copied folder> --hunt --maps <maps folder> --csv <out>\csv --blobdir <out>\blobs
+   SQLECmd.exe -d <copied folder> --hunt --csv <out>\csv --blobdir <out>\blobs
    ```
+4. SQLECmd's `--sync` downloads the stock maps again and can put the stock PhotosDB v1.1 back; copy v1.3 in again after a sync.
 
 **Design rules**
 
@@ -309,7 +311,7 @@ The stock maps for `contacts.db`, `phone.db`, `notifications.db` and `settings.d
 - **Every blob is written, once.**
   - File names come from a unique key, because SQLECmd otherwise cuts names to 50 characters and silently overwrites duplicates.
   - Blob columns are always real BLOB values, so SQLECmd's CSV columns stay aligned.
-- **Unconfirmed epochs are labelled.** They are converted by size, with the raw value kept beside them.
+- **Unconfirmed epochs are labelled.** They are converted by size, with the raw value kept beside them. A size-based reading can still be an implausible date (the ContinuityDB map's comments give each range), so check it against the raw value.
 - **Fast on large databases.** In a stress test, 1,000,000 calls, 500,000 photos and 20,000 apps with icons ran through SQLECmd in about 85 s.
 
 **SQLECmd behaviours to know** (not fixable in a map)
@@ -325,19 +327,29 @@ The stock maps for `contacts.db`, `phone.db`, `notifications.db` and `settings.d
 
 ## Tests
 
-All tests use synthetic data. GitHub Actions runs them on every push (badge at the top).
+All tests use synthetic data.
+
+**Run by CI on every push and pull request** (GitHub Actions, Windows, Python 3.12; badge at the top). CI first fetches SQLECmd's maps at a pinned commit (`c67634af503bd53777689998f1d9e3c0b4e2fdff`) into `upstream/` for the cross-match test:
 
 ```bash
 pip install pyyaml yamllint
 yamllint -c .yamllint maps
-python tests/run_tests.py                          # maps: emulator of SQLECmd's matching, answer-key data
-python tests/run_tests.py --sqlecmd C:\Tools\SQLECmd.exe   # maps: also the real SQLECmd
-python tests/stress.py C:\Tools\SQLECmd.exe        # maps: large synthetic databases
-python viewer/test_plevidence.py                   # viewer: copying, snapshot stability, carving, read-only opens
+python tests/test_run_tests.py                     # the test harness itself: a check that did not run never passes (set PL_UPSTREAM_MAPS for its cross-match case)
+python tests/run_tests.py --upstream-maps upstream/SQLMap/Maps   # maps: emulator of SQLECmd's rules, answer-key data, cross-match against the upstream maps
 python viewer/test_plrelate.py                     # viewer: relations, planted answers
+python viewer/test_plevidence.py                   # viewer: copying, snapshot stability, carving, read-only opens
 python viewer/test_pldevices.py                    # viewer: linked phones
 python viewer/test_plconnect.py                    # viewer: USB cable / Bluetooth (synthetic registry)
 python viewer/test_plmapview.py                    # viewer: the window itself
+```
+
+To run the cross-match locally, clone [SQLECmd](https://github.com/EricZimmerman/SQLECmd), check out that commit and pass its `SQLMap/Maps` folder. Without `--upstream-maps`, `run_tests.py` reports the cross-match as `SKIP`, never as a pass.
+
+**Manual only** (needs `SQLECmd.exe`, so CI does not run these):
+
+```bash
+python tests/run_tests.py --sqlecmd C:\Tools\SQLECmd.exe   # maps: also through the real SQLECmd
+python tests/stress.py C:\Tools\SQLECmd.exe        # maps: large synthetic databases, timed
 ```
 
 See [docs/TESTING.md](docs/TESTING.md) for how the maps were tested.
@@ -346,11 +358,19 @@ See [docs/TESTING.md](docs/TESTING.md) for how the maps were tested.
 
 ## Limitations
 
-- Tested against Windows 11 Phone Link builds from 2026 with linked Android phones. A future Phone Link build may change the schema. The maps' IdentifyQueries then fail to match rather than give wrong output, and the viewer shows what it finds.
+- **Tested versions.** Tested with Phone Link builds from 2026 on Windows 11 25H2 (build 26200) with an Android 16 phone. iPhone pairings and Windows 10 are untested. A future Phone Link build may change the schema. The maps' IdentifyQueries then fail to match rather than give wrong output, and the viewer shows what it finds.
 - `continuity.db` and `pcapp_data` were empty on the test systems, so those queries are tested on synthetic rows, and their epochs are inferred by size.
 - Carving recovers what SQLite left in free space. A recovered row is matched by its record shape, not proven, and each one shows the page and offset it came from.
 - The USB install / first / last-arrival times under `Properties` need SYSTEM rights and are not read. The key last-write time is a lead, not a connection time.
-- iPhone pairings with Phone Link were not tested.
+
+**What it does not do**
+
+- **No acquisition.** It does not image a disk or collect files for you; it reads a folder you give it (or this PC's live registry and logs for the cable / Bluetooth section).
+- **No decryption.** Nothing is decrypted; `PlatformEncryptedKeyStorage.json` and the Bluetooth link keys are never read.
+- **No admin rights needed or used.** It runs as a standard user and never asks for elevation. The SYSTEM-only locations in the tables above are not read, and a location the account cannot read is listed as such, not shown as empty.
+- **iPhone untested.** iPhone pairings with Phone Link were not tested.
+- **Windows 10 untested.**
+- **Not every deleted row comes back.** A single deleted row whose record header was overwritten (the usual result of a one-row delete) is generally not recovered; recoveries come mostly from whole free pages, page slack and WAL frames.
 
 ## Related
 
@@ -358,4 +378,8 @@ Capability Access Manager (camera, microphone and location usage) maps are a sep
 
 ## Credits
 
-`Windows_YourPhone_PhotosDB.smap` builds on Andrew Rathbun's original map. MIT licence.
+- `Windows_YourPhone_PhotosDB.smap` builds on **Andrew Rathbun**'s original map in SQLECmd.
+- **Eric Zimmerman**'s [SQLECmd](https://github.com/EricZimmerman/SQLECmd) runs the maps; the four stock Phone Link maps the viewer also runs are SQLECmd's own, kept unchanged in [`viewer/maps-upstream`](viewer/maps-upstream) under SQLECmd's MIT licence (see its [README](viewer/maps-upstream/README.md)).
+- **kacos2000**'s [Your Phone research and SQL](https://github.com/kacos2000/Win10/blob/master/YourPhone/readme.md), which the CallingDB and PhotosDB maps (and the stock maps) cite as their documentation.
+
+This repository is under the MIT licence ([LICENSE](LICENSE)); the files in `viewer/maps-upstream` keep their own MIT notice.

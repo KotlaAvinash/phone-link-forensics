@@ -6,26 +6,26 @@ Everything in this repository was tested on **synthetic data only**. The maps we
 
 `tests/fixtures.py` builds Phone Link databases from invented values (`example.com`, `com.example.*`, `555-01xx` numbers). It also computes the expected output **in Python, independently of the maps' SQL**.
 
-Each scenario runs through two engines:
-- an emulator of SQLECmd's rules: string-equal IdentifyValue; blob names `{time}_{prefix}_{base}_{id}_{name ≤50}_{column}.{ext}`; case-insensitive overwrite; NULL-blob row shift
-- the real SQLECmd.exe
+Each scenario can run through two engines:
+- an emulator of SQLECmd's rules: string-equal IdentifyValue; blob names `{time}_{prefix}_{base}_{id}_{name ≤50}_{column}.{ext}`; case-insensitive overwrite; NULL-blob row shift. **CI runs this engine on every push.**
+- the real SQLECmd.exe, only with `--sqlecmd <path to SQLECmd.exe>`. **CI does not run it** (SQLECmd.exe is not installed there); it is run by hand. Without `--sqlecmd` the run reports `SKIP: real SQLECmd engine`, not a pass.
 
 | Scenario | What it proves |
 |---|---|
 | current | Each database matches exactly its own map. Every row, column, blob, file name, extension and sort order equals the answer key |
 | edge-values | Zero, NULL, negative, text and out-of-range times, including text in size-based epoch columns. Unknown call types. CSV-hostile text: commas, quotes, newlines, emoji, RTL, `=HYPERLINK`. Path-traversal, reserved, over-long, cloned and case-only-different package names |
 | wal-only | Rows that exist only in an un-checkpointed `-wal` are parsed |
-| legacy-photos | The 2021 `media` + `photo` layout still matches PhotosDB v1.2 |
+| legacy-photos | The 2021 `media` + `photo` layout still matches PhotosDB v1.3 |
 | negatives | Unrelated `media` / `wallpaper` tables, the older settings.db layout, empty, zero-byte, text, truncated databases, and **views planted under the expected table names**. None match, nothing crashes |
-| cross-match | With all upstream SQLECmd maps loaded, each synthetic database matches exactly one map |
+| cross-match | Only with `--upstream-maps <folder>`; CI passes SQLECmd's `SQLMap/Maps` at the pinned commit `c67634af503bd53777689998f1d9e3c0b4e2fdff` (93 maps). This repo's PhotosDB replaces upstream's map of the same file name, as it does when copied into SQLECmd's `Maps` folder. Each synthetic database must then match exactly one map. A missing folder, or one with fewer than 50 maps, fails instead of passing; without the option the check is reported as `SKIP` |
 
-When the real SQLECmd is used, every CSV row is also checked:
+When the real SQLECmd is used (manual runs only), every CSV row is also checked:
 - it has exactly the header's field count;
 - its `SourceFile` cell holds the database path.
 
 ### The tests can fail
 
-A test suite only counts if a broken map makes it fail. 11 deliberate breakages were run, and every one makes the suite fail, on both engines:
+A test suite only counts if a broken map makes it fail. 11 deliberate breakages were run, and every one made the suite fail, on both engines:
 - wrong blob extension (×2)
 - changed ORDER BY
 - an invented column
@@ -48,9 +48,13 @@ On a real Windows 11 system, the maps ran through SQLECmd on **copies** of the P
 
 ## 3. Stress and performance (`tests/stress.py`, synthetic)
 
+Run by hand (needs SQLECmd.exe; CI does not run it).
+
 | Input | Result with the real SQLECmd |
 |---|---|
 | 1,000,000 calls, 500,000 photos, 20,000 apps with 16 KB icons, 20,000 PC-app links | All rows and all 20,000 icons out; about 85 s; about 760 MB peak memory |
+
+"Peak memory" is the highest resident memory (working set) of the SQLECmd process seen while sampling it every 0.1 s with `psutil`, not Windows' recorded peak working set, so a short spike between samples can be missed. Without `psutil` installed, the script prints `n/a`.
 
 The PC-app name lookup was quadratic in an earlier draft (29 s at 20,000 rows). It was rewritten as a pre-grouped join, which takes 0.1 s at the same size.
 
@@ -72,6 +76,6 @@ Results with SQLECmd 2026.5.0:
 - `-shm` files are written beside the input
 - stored types are converted to the declared column type
 
-## 5. Independent review
+## 5. Review
 
-Two review rounds by independent reviewers (correctness, robustness, privacy) produced the fixes above, and the final round verified every fix. A privacy audit scanned every file and the full git history against all values extracted from the real test databases and the test machine, and found none.
+Several review rounds (correctness, robustness, privacy) produced the fixes above, and the last round re-checked each fix. A privacy audit scanned every file and the full git history against all values extracted from the real test databases and the test machine, and found none.
