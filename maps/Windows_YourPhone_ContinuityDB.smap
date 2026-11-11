@@ -90,7 +90,7 @@ Queries:
 # Tested on a current Windows 11 build (October 2026) against synthetic rows only; the epochs below are not confirmed from populated real tables.
 # browser_history holds pages open in a phone browser, as offered to the PC. It has no timestamp column; Rank is the only ordering.
 # continue_app_context holds what the user was doing in a phone app, offered to the PC for cross-device handoff.
-# The epoch of create_time and last_updated_time could not be confirmed with empty tables. The *TimeUTC columns convert by size (.NET ticks, FILETIME, Unix microseconds, milliseconds or seconds; each range maps to plausible dates only), and the *Raw columns keep the original value so the conversion can be checked.
+# The epoch of create_time and last_updated_time could not be confirmed with empty tables. The *TimeUTC columns convert by size (.NET ticks, FILETIME, Unix microseconds, milliseconds or seconds). The size ranges do not overlap, so each value gets one reading, but a reading is not always a plausible date: seconds (below 1e11) and milliseconds (1e11 to below 1e14) reach year 5138, microseconds (1e14 to below 1e16) run from 1973 to 2286, FILETIME (1e16 to below 4e17) from 1632 to 2868, and .NET ticks (4e17 and up) start in 1268. A date far from the case's time frame means the guessed unit is wrong. The *Raw columns keep the original value so the conversion can be checked.
 # life_time defaults to -1 and its unit is unknown, so it is left raw.
 # The format of the Favicon and Preview blobs is unknown, so they are saved with the default .blob extension.
 # Use SQLECmd in conjunction with the Windows Your Phone KAPE Target: https://github.com/EricZimmerman/KapeFiles/blob/master/Targets/Apps/WindowsYourPhone.tkape
