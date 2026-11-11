@@ -310,6 +310,7 @@ def _db_summary(pc, guid, info, ts_seconds):
     """Per-device database summary: databases present, data rows, activity range, SIM."""
     dbs = sorted({os.path.basename(f) for f in info["files"] if f.endswith(".db")})
     rows, other, bad, first, last, sim, details = 0, 0, 0, None, None, "", []
+    other_names = []   # '<db> <table> (<rows>)' for rows outside DATA_TABLES - named in the status
     for db in dbs:
         p = None
         for f in info["files"]:
@@ -344,6 +345,7 @@ def _db_summary(pc, guid, info, ts_seconds):
                 other += n
                 if n:
                     found.append(f"{t}: {n}")
+                    other_names.append(f"{db} {t} ({n})")
             if found:
                 details.append(f"{db}: other tables - " + ", ".join(found))
             if failed:
@@ -372,12 +374,12 @@ def _db_summary(pc, guid, info, ts_seconds):
         status = "files present but no databases"
     elif rows:
         status = "data present"
-    elif other:
-        status = "data in other tables"
+    elif other:   # DataRows counts only DATA_TABLES, so say exactly where the rows are
+        status = "rows only in tables not counted here: " + ", ".join(other_names)
     elif bad:
         status = "unreadable database"
     else:
-        status = "databases present but empty"
+        status = "databases present, no rows"
     return dbs, rows, first, last, sim, status, details
 
 
@@ -529,7 +531,8 @@ def _build(pc, g, View, ts_seconds, iso):
         "".join(w + ". " for w in pc.warnings + ([copy_warn] if copy_warn else [])) +
         f"one folder per pairing under LocalCache\\Indexed, numbered in order of creation. FolderCreatedUTC = "
         f"{FOLDER_TIME_CAVEAT}; TimeCheck says whether it looks like a copy time. Empty folders are pairings whose "
-        f"data Phone Link removed",
+        f"data Phone Link removed. DataRows counts rows in the known data tables (calls, messages, contacts, photos, "
+        f"apps, notifications, shared content); rows found only in other tables are named in Status",
         ["#", "DeviceFolder", "FolderCreatedUTC", "FolderModifiedUTC", "TimeCheck", "Status", "Databases", "DataRows",
          "FirstActivityUTC", "LastActivityUTC", "SIM", "StreamedApps", "Detail"], folder_rows)
 

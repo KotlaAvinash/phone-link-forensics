@@ -118,13 +118,32 @@ class PairingStatus(unittest.TestCase):
             g = R.Graph()
             _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
             pc.close()
-        got = {r["DeviceFolder"]: r["Status"] for r in g.views["PC_devices"].rows}
+        rows = {r["DeviceFolder"]: r for r in g.views["PC_devices"].rows}
+        got = {k: r["Status"] for k, r in rows.items()}
         self.assertEqual(got[G[0]], "folder only - its data was removed")
         self.assertEqual(got[G[1]], "files present but no databases")
         self.assertEqual(got[G[2]], "unreadable database")
-        self.assertEqual(got[G[3]], "data in other tables")
-        self.assertEqual(got[G[4]], "databases present but empty")
+        self.assertEqual(got[G[3]], "rows only in tables not counted here: settings.db settings (1)")
+        self.assertEqual(got[G[4]], "databases present, no rows")
         self.assertEqual(got[G[5]], "data present")
+        # no status claims data next to DataRows 0 without naming where the rows are
+        for k, r in rows.items():
+            if r["DataRows"] == 0:
+                self.assertFalse(r["Status"].startswith(("data present", "data in")), r)
+
+    def test_empty_databases_of_several_kinds_are_no_rows(self):
+        # contacts.db, settings.db and sharedcontent.db present, every table empty
+        files = {"System/Database/contacts.db": [("CREATE TABLE contact (id INTEGER)", [])],
+                 "System/Database/settings.db": [("CREATE TABLE settings (k TEXT)", [])],
+                 "System/Database/sharedcontent.db": [("CREATE TABLE sharedcontent (id INTEGER)", []),
+                                                      ("CREATE TABLE shareduri (id INTEGER)", [])]}
+        with tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, folders=[(G[0], files)])
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+        r = g.views["PC_devices"].rows[0]
+        self.assertEqual((r["Status"], r["DataRows"]), ("databases present, no rows", 0))
 
 
 class DemoPackageIsClean(unittest.TestCase):
@@ -135,7 +154,7 @@ class DemoPackageIsClean(unittest.TestCase):
 
 
 class OtherTables(unittest.TestCase):
-    """'data in other tables' must not count bookkeeping tables, and must say which tables it counted."""
+    """Rows only in other tables must not count bookkeeping tables, and the status names the tables counted."""
 
     def summarize(self, files):
         with WorkFolders(), tempfile.TemporaryDirectory() as tmp:
@@ -152,14 +171,14 @@ class OtherTables(unittest.TestCase):
             ("CREATE TABLE _change_notifications (id INTEGER PRIMARY KEY, what TEXT)",
              ["INSERT INTO _change_notifications (what) VALUES ('x')", "INSERT INTO _change_notifications (what) VALUES ('y')"]),
             ("CREATE TABLE call_history (id INTEGER, start_time INTEGER)", [])]})
-        self.assertEqual(row["Status"], "databases present but empty")
+        self.assertEqual(row["Status"], "databases present, no rows")
 
     def test_rows_in_an_unknown_table_are_named(self):
         row = self.summarize({"System/Database/calling.db": [
             ("CREATE TABLE content_sequence (content_type TEXT)", ["INSERT INTO content_sequence VALUES ('call_logs')"]),
             ("CREATE TABLE mystery (a TEXT)", ["INSERT INTO mystery VALUES ('1')", "INSERT INTO mystery VALUES ('2')"]),
             ("CREATE TABLE emptyone (a TEXT)", [])]})
-        self.assertEqual(row["Status"], "data in other tables")
+        self.assertEqual(row["Status"], "rows only in tables not counted here: calling.db mystery (2)")
         self.assertIn("mystery: 2", row["Detail"])
         self.assertNotIn("content_sequence", row["Detail"])
         self.assertNotIn("emptyone", row["Detail"])
@@ -167,7 +186,7 @@ class OtherTables(unittest.TestCase):
     def test_table_name_with_a_double_quote(self):
         row = self.summarize({"System/Database/settings.db": [
             ('CREATE TABLE "we""ird" (a TEXT)', ["INSERT INTO \"we\"\"ird\" VALUES ('1')"])]})
-        self.assertEqual(row["Status"], "data in other tables")
+        self.assertEqual(row["Status"], 'rows only in tables not counted here: settings.db we"ird (1)')
         self.assertIn('we"ird: 1', row["Detail"])
 
     def test_a_table_that_cannot_be_counted_does_not_stop_the_activity_range(self):
@@ -682,7 +701,7 @@ class LinkedPhones(unittest.TestCase):
     def test_every_pairing_in_order_with_status(self):
         got = [(r["#"], r["DeviceFolder"], r["Status"]) for r in self.rows("PC_devices")]
         self.assertEqual(got, [(1, pldemo.PAIRING_GUIDS[0], "folder only - its data was removed"),
-                               (2, pldemo.PAIRING_GUIDS[1], "databases present but empty"),
+                               (2, pldemo.PAIRING_GUIDS[1], "databases present, no rows"),
                                (3, pldemo.PAIRING_GUIDS[2], "data present")])
         cur = self.rows("PC_devices")[2]
         self.assertGreater(cur["DataRows"], 0)
