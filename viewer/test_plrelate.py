@@ -145,7 +145,11 @@ class Demo(unittest.TestCase):
     def test_r23_orphans(self):
         got = {(r["Problem"], r["ID"]) for r in self.view("R23")}
         self.assertEqual(got, {("participant without thread", 4), ("message without thread", 3),
-                               ("contact detail without contact", 6), ("RCS thread without SMS fallback thread", 51)})
+                               ("contact detail without contact", 6), ("RCS thread without SMS fallback thread", 51),
+                               ("message without SIM", 3)})
+        sim = [r for r in self.view("R23") if r["Problem"] == "message without SIM"][0]
+        self.assertEqual((sim["Table"], sim["MissingKey"]), ("message", 2))     # subscription 2 does not exist
+        self.assertEqual(self.g.views["R23"].problems, 5)
 
     def test_r24_unknown_and_dormant(self):
         got = {(r["Finding"], r["Contact"] or r["Party"]) for r in self.view("R24")}
@@ -388,6 +392,13 @@ class SchemaTolerance(unittest.TestCase):
         self.assertFalse([r for r in g.views["R23"].rows if r["Problem"] == "message without thread"])
         self.assertIn("message.thread_id", g.views["E_sms"].basis)
         self.assertIn("message.thread_id", g.views["R23"].basis)
+
+    def test_missing_sim_key_or_table_does_not_invent_orphans(self):
+        for edit in ("ALTER TABLE message DROP COLUMN subscription_id", "DROP TABLE subscription"):
+            ev, g = build_edited(self, {"phone.db": [edit]})
+            self.assertFalse([r for r in g.views["R23"].rows if r["Problem"] == "message without SIM"], edit)
+        ev, g = build_edited(self, {"phone.db": ["UPDATE message SET subscription_id = NULL WHERE message_id = 3"]})
+        self.assertFalse([r for r in g.views["R23"].rows if r["Problem"] == "message without SIM"])   # no key at all
 
     def test_missing_contact_link_column(self):
         ev, g = build_edited(self, {"contacts.db": ["ALTER TABLE phonenumber DROP COLUMN contact_id"]})

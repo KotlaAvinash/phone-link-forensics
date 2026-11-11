@@ -215,11 +215,17 @@ class Evidence:
 
 # ---------------------------------------------------------------- graph
 class View:
-    """kind: table | in-table | in-db | check | cross | map | provenance."""
+    """kind: table | in-table | in-db | check | cross | map | provenance.
 
-    def __init__(self, vid, title, kind, basis, cols, rows, db=None):
+    problems: on a check view, how many of its rows are actual problems (not agrees / same / ok); None elsewhere.
+    matched:  on a relation view that also lists left-side rows without a partner (a *Found column), how many rows
+              have their partner; None elsewhere."""
+
+    def __init__(self, vid, title, kind, basis, cols, rows, db=None, problems=None, matched=None):
         self.vid, self.title, self.kind, self.basis, self.cols, self.rows = vid, title, kind, basis, cols, rows
         self.db = db
+        self.problems = problems
+        self.matched = matched
 
 
 class Graph:
@@ -339,7 +345,7 @@ def view_sources(vid):
         "R18": calls + sms + threads + names,
         "R19": src(nt, "notifications") + apps + src("settings.db", "settings") + cont,
         "R20": calls + photo, "R21": timeline, "R22": timeline,
-        "R23": part + sms + threads + rcs + contact, "R24": calls + sms + threads + names + contact,
+        "R23": part + sms + threads + rcs + contact + sims, "R24": calls + sms + threads + names + contact,
         "R25": [(db, "content_sequence") for db in P.DB_NAMES],
         "N_toasts": src(nt, "notification_toastmappings"), "N_requests": src(nt, "phone_requests"),
         "ND1": src(nt, "notifications", "notification_toastmappings"),
@@ -896,9 +902,16 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         if has_col("phone.db", "rcs_conversation", "fallback_id") and r["fallback_id"] not in sms_threads:
             rows.append({"Problem": "RCS thread without SMS fallback thread", "Table": "rcs_conversation",
                          "ID": r["thread_id"], "MissingKey": r["fallback_id"]})
+    # a message naming a SIM the subscription table does not hold; NULL is "no SIM recorded", not a missing partner
+    if has_col("phone.db", "message", "subscription_id") and has_col("phone.db", "subscription", "subscription_id"):
+        for m in sms_rows:
+            if m["SIM"] is not None and str(m["SIM"]) not in sims:
+                rows.append({"Problem": "message without SIM", "Table": "message", "ID": m["MessageID"],
+                             "MissingKey": m["SIM"]})
     rel("R23", "Orphans: rows whose partner is missing", "integrity",
         "a key that points at a row which no longer exists - deletion, partial sync or pruning",
         ["Problem", "Table", "ID", "MissingKey"], rows)
+    g.views["R23"].problems = len(rows)       # every row here is a key whose partner is missing
 
     # R24 unknown parties and dormant contacts
     rows = []
