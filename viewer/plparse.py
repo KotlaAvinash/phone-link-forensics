@@ -575,8 +575,11 @@ def parse_all(dbs, ft_db, idx, digits, device_label=None):
         parts.setdefault(r["thread_id"], []).append(r["normalized_address"] or r["send_address"])
 
     bodies = {}
+    errs_before = len(QUERY_ERRORS)
     for r in q(dbs.get("phone.db"), "SELECT thread_id, COUNT(*) n FROM message GROUP BY thread_id"):
         bodies[r["thread_id"]] = r["n"]
+    # A failed read of the messages is not "no messages": then nothing can be said about aging out.
+    bodies_read = len(QUERY_ERRORS) == errs_before
 
     threads = []
     for r in q(dbs.get("phone.db"), "SELECT * FROM conversation ORDER BY timestamp DESC"):
@@ -586,8 +589,8 @@ def parse_all(dbs, ft_db, idx, digits, device_label=None):
                         "addr_kind": kind, "contact_name": name, "name_source": src,
                         "last_activity_utc": iso, "epoch": rule,
                         "msg_count_reported": r["msg_count"],
-                        "bodies_retained": bodies.get(r["thread_id"], 0),
-                        "content_aged_out": "YES" if bodies.get(r["thread_id"], 0) == 0 else "",
+                        "bodies_retained": bodies.get(r["thread_id"], 0) if bodies_read else "",
+                        "content_aged_out": "YES" if bodies_read and bodies.get(r["thread_id"], 0) == 0 else "",
                         "unread_pc": r["unread_count"], "unread_phone": r.get("phone_unread_count"),
                         "has_rcs": r["has_rcs"],
                         "participants": " | ".join(parts.get(r["thread_id"], []))})

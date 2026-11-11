@@ -620,6 +620,42 @@ class TruncatedDatabase(unittest.TestCase):
             self.assertGreater(acq["counts"]["carved candidates"], 0)     # the other file was still carved
 
 
+def demo_dbs(folder, edits=None):
+    """pldemo databases {name: path}, with optional SQL edits {db: [sql]}."""
+    src = pldemo.build(folder)
+    for db, stmts in (edits or {}).items():
+        c = sqlite3.connect(os.path.join(src, db))
+        for s in stmts:
+            c.execute(s)
+        c.commit()
+        c.close()
+    return {n: os.path.join(src, n) for n in P.DB_NAMES if os.path.isfile(os.path.join(src, n))}
+
+
+class ParseAll(unittest.TestCase):
+    def parse(self, edits=None):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        del P.QUERY_ERRORS[:]
+        d = P.parse_all(demo_dbs(os.path.join(tmp, "dev"), edits), None, {}, 10)
+        return d, list(P.QUERY_ERRORS)
+
+    def test_aged_out_is_judged_when_messages_were_read(self):
+        d, errs = self.parse()
+        self.assertFalse([e for e in errs if "message" in e["sql"]])
+        t = {r["thread_id"]: r for r in d["threads"]}
+        self.assertEqual(t[2]["content_aged_out"], "YES")          # demo thread 2 has no message rows
+        self.assertEqual(t[1]["content_aged_out"], "")
+
+    def test_aged_out_is_blank_when_the_message_read_failed(self):
+        d, errs = self.parse({"phone.db": ["DROP TABLE message"]})
+        self.assertTrue([e for e in errs if "message" in e["sql"]])
+        self.assertEqual(len(d["threads"]), 3)
+        for t in d["threads"]:
+            self.assertEqual(t["content_aged_out"], "", t)        # unknown, not "aged out"
+            self.assertEqual(t["bodies_retained"], "", t)
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
