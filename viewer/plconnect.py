@@ -51,6 +51,8 @@ DEVICE_PREFIXES = ("USB\\", "SWD\\WPDBUSENUM", "BTHENUM\\", "BTHLE\\", "BTHLEDEV
 EVENT_CAP = 10000   # newest events read per channel; older ones are not shown (stated in the C_events view)
 # Windows' ContainerID for "the PC itself" (not a device): zeros, then ffff, then twelve f, written in parts
 NULL_CONTAINER = "{%s-%s-%s-%s-%s}" % ("0" * 8, "0" * 4, "0" * 4, "ffff", "f" * 12)
+# Kernel-PnP event fields that name ANOTHER device than the event's own (DeviceInstanceId), written in parts
+PARENT_FIELD, MATCHING_FIELD = "Parent" + "DeviceInstanceId", "Matching" + "DeviceId"
 
 # [published] Bluetooth Core: class-of-device major classes
 BT_MAJOR = {0: "Miscellaneous", 1: "Computer", 2: "Phone", 3: "Network access point", 4: "Audio/Video",
@@ -625,7 +627,8 @@ def build(src, g, View):
         if len(got) >= EVENT_CAP:
             capped.append(ch.split("/")[0].replace("Microsoft-Windows-", ""))
         for t, eid, data in got:
-            devid = next((x for x in data.values() if x.upper().startswith(DEVICE_PREFIXES)), "")
+            hits = [(k, x) for k, x in data.items() if x.upper().startswith(DEVICE_PREFIXES)]
+            field, devid = next(((k, x) for k, x in hits if k == "DeviceInstanceId"), hits[0] if hits else ("", ""))
             if ch.endswith("Kernel-PnP/Configuration") and not devid:
                 continue
             dev = by_instance.get(devid.upper()) if devid else None
@@ -640,10 +643,19 @@ def build(src, g, View):
                     p["first"], p["last"] = min(p["first"], t), max(p["last"], t)
                     p["n"] += 1
                     p["events"].append(ee)
+            meaning, whose = EVENT_MEANING.get((log, eid), ""), ""
+            own = data.get("DeviceInstanceId") or "not named"
+            if field == PARENT_FIELD:
+                whose = f"event for a child device of {devid}"
+            elif field and field != "DeviceInstanceId" and log == "Kernel-PnP":
+                whose = f"event for device {own}, matched only through {field} {devid}"
+            if whose:
+                meaning = f"{meaning} ({whose})" if meaning else f"({whose})"
             if dev:
-                g.link("CR4", dev, ee, f"Stored link: event {eid} in {log} names this device id")
-            rows.append({"_e": ee, "TimeUTC": t, "Log": log, "EventID": eid,
-                         "Meaning": EVENT_MEANING.get((log, eid), ""), "ReportedDevice": reported, "DeviceID": devid,
+                g.link("CR4", dev, ee, f"Stored link: event {eid} in {log} names this device id"
+                       + (f" as its {field} ({whose})" if whose else ""))
+            rows.append({"_e": ee, "TimeUTC": t, "Log": log, "EventID": eid, "Meaning": meaning,
+                         "ReportedDevice": reported, "DeviceID": devid, "MatchedField": field,
                          "MatchedDevice": g.label.get(dev, "") if dev else "",
                          "Data": "; ".join(f"{k}={v}" for k, v in data.items() if v and v != devid)[:300]})
     rows.sort(key=lambda r: r["TimeUTC"], reverse=True)
@@ -651,9 +663,12 @@ def build(src, g, View):
         "Kernel-PnP/Configuration (device configured / started), WPD-MTP and Bluetooth LE pairing logs. Logs roll over, "
         f"so only recent connections remain; at most the newest {EVENT_CAP:,} events of each log are read"
         + (f" (reached for {', '.join(capped)} - older events are not shown)" if capped else "")
-        + ". Meaning = Windows' own message text for that event ID; event 1005 names the "
+        + ". A Kernel-PnP event is kept when any of its fields is a USB / portable / Bluetooth device id; "
+        f"MatchedField says which (DeviceInstanceId = the event's own device; {PARENT_FIELD} = the event is "
+        f"for a child device of it; {MATCHING_FIELD} = the driver id matched, for another device) and Meaning says so. "
+        "Meaning = Windows' own message text for that event ID; event 1005 names the "
         "connected phone's make, model and OS version", ["TimeUTC", "Log", "EventID", "Meaning", "ReportedDevice",
-                                                        "DeviceID", "MatchedDevice", "Data"], rows)
+                                                        "DeviceID", "MatchedField", "MatchedDevice", "Data"], rows)
 
     # same physical device across sources (ContainerID)
     rel = []

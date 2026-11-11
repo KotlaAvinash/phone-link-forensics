@@ -324,6 +324,39 @@ class PhysicalDevice(unittest.TestCase):
         self.assertIn("same make/model/OS \u2013 may be more than one phone", r["Evidence"])
 
 
+class EventMatchedField(unittest.TestCase):
+    """A Kernel-PnP event kept only because a parent / matching id is a device id is about another device."""
+    PHONE = "USB\\VID_1234&PID_0F01\\TEST0001"
+
+    def events(self):
+        ch = C.CHANNELS[0]
+        return {ch: [
+            ("2030-01-02 09:00:00", "410", {"DeviceInstanceId": self.PHONE}),
+            ("2030-01-02 09:00:01", "400", {"DeviceInstanceId": "HID\\VID_1234&PID_0F01\\8&1&0&0000",
+                                            C.PARENT_FIELD: self.PHONE}),
+            ("2030-01-02 09:00:02", "400", {"DeviceInstanceId": "SWD\\EXAMPLE\\TEST0002",
+                                            C.MATCHING_FIELD: "USB\\VID_1234&PID_0F01"})]}
+
+    def rows(self):
+        keys = keys_of((C.USB, None, ["VID_1234&PID_0F01"]), (C.USB + r"\VID_1234&PID_0F01", None, ["TEST0001"]),
+                       (C.USB + r"\VID_1234&PID_0F01\TEST0001", {"Service": "WUDFWpdMtp"}, []))
+        g = build_from(C.FakeSource(keys, "", self.events()))
+        return g, {r["TimeUTC"][-2:]: r for r in g.views["C_events"].rows}
+
+    def test_matched_field_column(self):
+        g, ev = self.rows()
+        self.assertIn("MatchedField", g.views["C_events"].cols)
+        self.assertEqual([ev[k]["MatchedField"] for k in ("00", "01", "02")],
+                         ["DeviceInstanceId", C.PARENT_FIELD, C.MATCHING_FIELD])
+
+    def test_meaning_says_the_event_is_for_another_device(self):
+        _, ev = self.rows()
+        self.assertEqual(ev["00"]["Meaning"], "device was started")
+        self.assertEqual(ev["01"]["Meaning"], f"device was configured (event for a child device of {self.PHONE})")
+        self.assertIn("matched only through " + C.MATCHING_FIELD, ev["02"]["Meaning"])
+        self.assertIn("SWD\\EXAMPLE\\TEST0002", ev["02"]["Meaning"])
+
+
 class PortableDevicesBothSources(unittest.TestCase):
     """C_wpd names two registry sources; devices only in WPD\\Devices must not be dropped."""
     VOL = "{e5e5e5e5-0000-4000-a000-000000000004}"
