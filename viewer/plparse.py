@@ -296,6 +296,9 @@ def stage(src_dir, work, acq, names=DB_NAMES):
     that never settles is kept, and its row says so: source_stable = UNSTABLE. Such a row
     holds no source hash (sha256 is ""); the hashes of the copy actually taken are
     copy_sha256 / copy_wal_sha256 / copy_shm_sha256.
+
+    The -shm never gets a source hash, stable or not: it is a shared-memory index that a running Phone Link
+    rewrites constantly, so the source can differ from the copy a moment later. Its row carries copy_shm_sha256 only.
     """
     os.makedirs(work, exist_ok=True)
     staged = {}
@@ -334,7 +337,10 @@ def stage(src_dir, work, acq, names=DB_NAMES):
                 elif suf == "-wal":
                     row[k + "_sha256"] = before[1]
                 else:
-                    row[k + "_sha256"] = sha256(src + suf)
+                    # The -shm is a shared-memory index the running app rewrites constantly, so a hash of the source
+                    # taken now need not be the bytes that were copied. Only the copy's own hash is recorded, and
+                    # the -shm is not verified against the source (the .db and -wal are).
+                    row["copy_" + k + "_sha256"] = sha256(dst + suf)
         acq.append(row)
         staged[name] = dst
     return staged

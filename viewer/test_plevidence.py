@@ -146,6 +146,48 @@ class SnapshotStability(unittest.TestCase):
             ev.close()
 
 
+class ChangingShm(unittest.TestCase):
+    """The -shm is a shared-memory index a running Phone Link rewrites constantly, so it can change between the copy
+    and any later hash of the source. That must not make a good copy look bad."""
+
+    def test_shm_that_changes_after_the_copy_does_not_fail_the_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live, src = os.path.join(tmp, "live"), os.path.join(tmp, "src")
+            w = wal_source(live)
+            os.makedirs(src)
+            try:
+                for suf in ("", "-wal", "-shm"):
+                    shutil.copyfile(os.path.join(live, "phone.db" + suf), os.path.join(src, "phone.db" + suf))
+            finally:
+                w.close()
+            shm = os.path.join(src, "phone.db-shm")
+            real = shutil.copy2
+
+            def copy2(s, d, *a, **k):
+                r = real(s, d, *a, **k)
+                if s.endswith("-shm"):                 # the app touches its index right after we copied it
+                    data = bytearray(read_bytes(shm))
+                    data[0] ^= 0xFF
+                    with open(shm, "wb") as fh:
+                        fh.write(data)
+                return r
+            shutil.copy2 = copy2
+            try:
+                ev = R.Evidence(src)                   # must not raise "does not match its source hash"
+            finally:
+                shutil.copy2 = real
+            try:
+                row = [a for a in ev.acq if a["file"] == "phone.db"][0]
+                self.assertEqual(row["source_stable"], "yes")
+                self.assertFalse(row.get("shm_sha256"))                      # no source hash claimed for -shm
+                self.assertEqual(row["copy_shm_sha256"], P.sha256(os.path.join(ev.work, "phone.db-shm")))
+                checked = {v["file"]: v["copy_matches"] for v in ev.verify}
+                self.assertEqual(checked, {"phone.db": "yes", "phone.db-wal": "yes"})   # .db and -wal still verified
+                self.assertEqual(row["wal_sha256"], P.sha256(os.path.join(src, "phone.db-wal")))
+            finally:
+                ev.close()
+
+
 class OddFolderNames(unittest.TestCase):
     def test_hash_and_percent_in_path(self):
         with tempfile.TemporaryDirectory() as tmp:

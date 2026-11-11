@@ -119,7 +119,7 @@ class Evidence:
                 if row.get("status") != "copied":
                     continue
                 stable = row.get("source_stable", "yes") == "yes"
-                for suffix, key in (("", "sha256"), ("-wal", "wal_sha256"), ("-shm", "shm_sha256")):
+                for suffix, key in (("", "sha256"), ("-wal", "wal_sha256"), ("-shm", "shm_sha256")):   # -shm: copy hash only (see P.stage)
                     copy = os.path.join(self.work, row["file"] + suffix)
                     if stable and row.get(key):
                         ok = P.sha256(copy) == row[key]
