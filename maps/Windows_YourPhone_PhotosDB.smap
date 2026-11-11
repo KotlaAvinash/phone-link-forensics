@@ -2,11 +2,11 @@ Description: Windows Your Phone Photos DB
 Author: Andrew Rathbun, Kotla Avinash
 Email: andrew.d.rathbun@gmail.com
 Id: 560f493c-bdf8-4e23-ac17-3f757c5a048a
-Version: 1.2
+Version: 1.3
 CSVPrefix: WindowsYourPhone
 FileName: photos.db
-IdentifyQuery: SELECT (SELECT count(*) FROM pragma_table_info('media') WHERE name IN ('id','name','mime_type','last_updated_time','taken_time','last_seen_time','height','width','orientation','size','uri')) + (SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('media'));
-IdentifyValue: 12
+IdentifyQuery: SELECT (SELECT count(*) FROM pragma_table_info('media') WHERE name IN ('id','name','mime_type','last_updated_time','taken_time','last_seen_time','height','width','orientation','size','uri','thumbnail','media')) + (SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('media'));
+IdentifyValue: 14
 Queries:
     -
         Name: Windows Your Phone Photos Database
@@ -83,7 +83,8 @@ Queries:
 # Use SQLECmd in conjunction with the Windows Your Phone KAPE Target: https://github.com/EricZimmerman/KapeFiles/blob/master/Targets/Apps/WindowsYourPhone.tkape
 # Version 1.2: the IdentifyQuery now checks for the 11 media columns the query reads, instead of requiring both the media and photo tables.
 # Current Phone Link builds (tested October 2026) no longer have a photo table, so version 1.1 returned 1, not 2, and photos.db was skipped.
-# Builds that still have the photo table also match, as long as media has these columns, which version 1.1's query already required.
+# Builds that still have the photo table also match, as long as media has the columns the queries read.
+# Version 1.3: the IdentifyQuery also checks for the thumbnail and media columns, which the Thumbnails and Media Blobs queries read, so it now checks all 13 media columns the queries use (IdentifyValue 14 = 13 columns + the media table). A media table without them no longer matches, instead of matching and failing on those queries.
 # Timestamps are FILETIME, in UTC. taken_time comes from the phone's clock and last_updated_time from the PC's sync. A value of 0 or less, or a value that is not a number, gives an empty time; the Raw columns keep the stored value.
 # Thumbnails (JPEG) and any media blob are exported by their own queries, one file per MediaID, and only for rows that hold one. Keeping each blob in its own query that skips empty rows keeps SQLECmd's CSV columns aligned.
 # SQLECmd notes: run it on copies, because it writes -shm/-wal files beside the input. It skips locked or hot-journal databases and ignores a WAL whose header does not match, both without an error exit code. It has no query timeout. It converts a value whose stored type differs from the column's declared type (text in an INTEGER column becomes 0 or its leading number), so the *Raw columns are cast to text to keep the stored value. Open the CSVs as text (or in Timeline Explorer): cells keep values exactly as stored, including leading = + - @ and NUL characters.
