@@ -248,6 +248,14 @@ def container_of(v):
     return "" if c == NULL_CONTAINER else c
 
 
+def wpd_key_to_instance(key):
+    """A WPD\\Devices key name -> the device instance id it names: 'USB#VID_1234&PID_0F10#SERIAL' ->
+    'USB\\VID_1234&PID_0F10\\SERIAL'. Only the first two '#' separate enumerator, device and instance (an SWD
+    instance itself contains '#'). A key with fewer parts is returned as it is."""
+    parts = str(key or "").split("#", 2)
+    return "\\".join(parts) if len(parts) == 3 and all(parts) else str(key or "")
+
+
 def parse_events_xml(xml_text, problems=None):
     """Events from wevtutil's XML. A parse error is appended to the `problems` list (if given)."""
     out = []
@@ -398,28 +406,60 @@ def build(src, g, View):
         ["Name", "Manufacturer", "VID", "PID", "SerialOrInstance", "Driver", "PhoneEvidence", "ContainerID",
          "Location", "FirstInstallLocal", "FirstInstallUTC", "KeyLastWriteUTC", "HardwareID", "InstanceID"], rows)
 
-    # portable devices (MTP)
-    names = {k.upper(): src.values(HKLM, f"{WPD_NAMES}\\{k}").get("FriendlyName", "")
-             for k in src.subkeys(HKLM, WPD_NAMES)}
+    # portable devices (MTP): the union of SWD\WPDBUSENUM and WPD\Devices. A WPD\Devices key is the device's
+    # PnP id with '\' written as '#': 'SWD#WPDBUSENUM#<instance>' is an SWD instance (the same device), and
+    # 'USB#VID_..#<serial>' an MTP phone or camera named by its USB instance.
+    usb_rows = {r["InstanceID"].upper(): r for r in rows}
+    phone_containers = {container_of(r["ContainerID"]) for r in rows if r["PhoneEvidence"]} - {""}
+    wpd_keys = {}   # instance id (upper) -> (WPD\Devices key, its values)
+    for k in src.subkeys(HKLM, WPD_NAMES):
+        wpd_keys.setdefault(wpd_key_to_instance(k).upper(), (k, src.values(HKLM, f"{WPD_NAMES}\\{k}")))
     rows = []
+
+    def wpd_row(e, iid, source, v, wv, path_hive_path):
+        container = v.get("ContainerID", "")
+        usb = usb_rows.get(iid.upper())
+        if usb is not None and not container:
+            container = usb["ContainerID"]
+        evidence = ""
+        if usb is not None and usb["PhoneEvidence"]:
+            evidence = f"same device as a USB phone ({usb['PhoneEvidence']})"
+        elif container_of(container) in phone_containers:
+            evidence = "same ContainerID as a USB phone"
+        elif iid.upper().startswith("USB\\"):
+            evidence = ("portable device named by a USB instance (an MTP/PTP device: a phone or camera), "
+                        "no USB driver key read for it")
+        name = clean_desc(v.get("FriendlyName")) or clean_desc(wv.get("FriendlyName"))
+        g.label[e] = f"portable device {name}"
+        first = install.get(iid.upper(), ("",))[0]
+        hive, path = path_hive_path
+        rows.append({"_e": e, "Name": name, "Source": source, "Manufacturer": clean_desc(v.get("Mfg")),
+                     "Description": clean_desc(v.get("DeviceDesc")), "Driver": v.get("Service", ""),
+                     "PhoneEvidence": evidence, "ContainerID": container, "FirstInstallLocal": first,
+                     "FirstInstallUTC": to_utc(first), "KeyLastWriteUTC": filetime(src.last_write(hive, path)),
+                     "InstanceID": iid})
+        if iid.upper() in by_instance:      # the USB device already owns this instance id: link, do not replace
+            g.link("CR1", by_instance[iid.upper()], e, "Stored link: WPD\\Devices names this USB instance id")
+            remember(e, container, None)
+        else:
+            remember(e, container, iid)
+
     for inst in src.subkeys(HKLM, WPD):
         path = f"{WPD}\\{inst}"
-        v = src.values(HKLM, path)
         iid = f"SWD\\WPDBUSENUM\\{inst}"
-        e = ("wpd", iid)
-        fname = clean_desc(v.get("FriendlyName")) or next((n for k, n in names.items() if k in inst.upper()), "")
-        g.label[e] = f"portable device {fname}"
-        first = install.get(iid.upper(), ("",))[0]
-        rows.append({"_e": e, "Name": fname, "Manufacturer": clean_desc(v.get("Mfg")),
-                     "Description": clean_desc(v.get("DeviceDesc")), "Driver": v.get("Service", ""),
-                     "ContainerID": v.get("ContainerID", ""), "FirstInstallLocal": first,
-                     "FirstInstallUTC": to_utc(first), "KeyLastWriteUTC": filetime(src.last_write(HKLM, path)),
-                     "InstanceID": iid})
-        remember(e, v.get("ContainerID"), iid)
+        k, wv = wpd_keys.pop(iid.upper(), None) or wpd_keys.pop(inst.upper(), None) or ("", {})
+        wpd_row(("wpd", iid), iid, "both" if k else "SWD", src.values(HKLM, path), wv, (HKLM, path))
+    for iid_u, (k, wv) in wpd_keys.items():
+        iid = wpd_key_to_instance(k)
+        wpd_row(("wpd", iid), iid, "WPD-Devices", {}, wv, (HKLM, f"{WPD_NAMES}\\{k}"))
     add("C_wpd", "Portable devices (MTP phones, cameras, volumes)",
-        "HKLM\\" + WPD + " and HKLM\\" + WPD_NAMES + " - what Windows showed in This PC when the device was plugged in",
-        ["Name", "Manufacturer", "Description", "Driver", "ContainerID", "FirstInstallLocal", "FirstInstallUTC",
-         "KeyLastWriteUTC", "InstanceID"], rows)
+        "HKLM\\" + WPD + " and HKLM\\" + WPD_NAMES + " - what Windows showed in This PC when the device was plugged "
+        "in. One row per device in either key (Source: SWD, WPD-Devices or both; a WPD\\Devices key is the device id "
+        "with '#' for '\\'). KeyLastWriteUTC is the SWD key's, or the WPD\\Devices key's for WPD-Devices rows. "
+        "PhoneEvidence: the USB phone driver of the same device or ContainerID, or a portable device named by a USB "
+        "instance (MTP/PTP)",
+        ["Name", "Source", "Manufacturer", "Description", "Driver", "PhoneEvidence", "ContainerID",
+         "FirstInstallLocal", "FirstInstallUTC", "KeyLastWriteUTC", "InstanceID"], rows)
 
     # Bluetooth paired / seen
     rows, bt = [], {}

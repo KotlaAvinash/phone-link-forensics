@@ -286,6 +286,60 @@ class PhysicalDevice(unittest.TestCase):
         self.assertIn("same make/model/OS \u2013 may be more than one phone", r["Evidence"])
 
 
+class PortableDevicesBothSources(unittest.TestCase):
+    """C_wpd names two registry sources; devices only in WPD\\Devices must not be dropped."""
+    VOL = "{e5e5e5e5-0000-4000-a000-000000000004}"
+    STICK1 = "_??_EXAMPLESTOR#Disk&Ven_Example&Prod_Stick&Rev_1.00#TEST0001&0#" + VOL
+    STICK2 = "_??_EXAMPLESTOR#Disk&Ven_Example&Prod_Stick2&Rev_1.00#TEST0002&0#" + VOL
+    PHONE_A_USB = ("VID_1234&PID_0F10&EXAMPLE_MTP&EXAMPLE_ANDROID", "6&1a2b3c4d&3&0000")
+    CID_A = "{e5e5e5e5-0000-4000-a000-000000000003}"
+
+    def build(self):
+        dev, inst = self.PHONE_A_USB
+        keys = keys_of(
+            (C.USB, None, [dev]), (C.USB + "\\" + dev, None, [inst]),
+            (C.USB + "\\" + dev + "\\" + inst, {"Service": "WUDFWpdMtp", "DeviceDesc": "Example Phone A",
+                                                "ContainerID": self.CID_A}, []),
+            (C.WPD, None, [self.STICK1]),
+            (C.WPD + "\\" + self.STICK1, {"FriendlyName": "STICK ONE", "Service": "WUDFWpdFs"}, []),
+            (C.WPD_NAMES, None, ["SWD#WPDBUSENUM#" + self.STICK1.upper(),       # same device as the SWD instance
+                                 "SWD#WPDBUSENUM#" + self.STICK2.upper(),       # a stick only in WPD\Devices
+                                 "USB#" + dev + "#" + inst.upper(),             # MTP phone, its USB key is read
+                                 "USB#VID_1234&PID_0F11#TEST0003"]),            # MTP phone, no USB key
+            (C.WPD_NAMES + "\\SWD#WPDBUSENUM#" + self.STICK1.upper(), {"FriendlyName": "STICK ONE"}, []),
+            (C.WPD_NAMES + "\\SWD#WPDBUSENUM#" + self.STICK2.upper(), {"FriendlyName": "STICK TWO"}, []),
+            (C.WPD_NAMES + "\\USB#" + dev + "#" + inst.upper(), {"FriendlyName": "Example Phone A"}, []),
+            (C.WPD_NAMES + "\\USB#VID_1234&PID_0F11#TEST0003", {"FriendlyName": "Example Phone B"}, []))
+        return build_from(C.FakeSource(keys))
+
+    def test_union_of_both_sources_deduped_with_source_column(self):
+        g = self.build()
+        self.assertIn("Source", g.views["C_wpd"].cols)
+        got = sorted((r["Name"], r["Source"]) for r in g.views["C_wpd"].rows)
+        self.assertEqual(got, [("Example Phone A", "WPD-Devices"), ("Example Phone B", "WPD-Devices"),
+                               ("STICK ONE", "both"), ("STICK TWO", "WPD-Devices")])
+        ids = {r["Name"]: r["InstanceID"] for r in g.views["C_wpd"].rows}
+        self.assertEqual(ids["STICK TWO"], "SWD\\WPDBUSENUM\\" + self.STICK2.upper())
+        self.assertEqual(ids["Example Phone B"], "USB\\VID_1234&PID_0F11\\TEST0003")
+
+    def test_wpd_only_phones_have_evidence_and_reach_the_summary(self):
+        g = self.build()
+        ev = {r["Name"]: r["PhoneEvidence"] for r in g.views["C_wpd"].rows}
+        self.assertEqual((ev["STICK ONE"], ev["STICK TWO"]), ("", ""))
+        self.assertIn("MTP phone/camera driver", ev["Example Phone A"])     # from its own USB key
+        self.assertTrue(ev["Example Phone B"])
+        wpd_a = next(r for r in g.views["C_wpd"].rows if r["Name"] == "Example Phone A")
+        self.assertEqual(wpd_a["ContainerID"], self.CID_A)
+        devices = " | ".join(r["Device"] + " " + str(r.get("SeenAs", "")) for r in phones_of(g))
+        self.assertIn("Example Phone B", devices)
+        self.assertIn("Example Phone A", devices)
+        self.assertNotIn("STICK", devices)
+        # the USB entity keeps its own instance id; the WPD-only row is linked to it, not put in its place
+        usb_e = ("usb", "USB\\" + self.PHONE_A_USB[0] + "\\" + self.PHONE_A_USB[1])
+        self.assertEqual(g.home[usb_e][0], "C_usb")
+        self.assertTrue(any(t[0] == "wpd" for _, t, _ in g.links(usb_e)))
+
+
 class Failures(unittest.TestCase):
     def run_events(self, run):
         fake = types.SimpleNamespace(denied=[])
