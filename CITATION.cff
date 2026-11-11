@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "phone-link-forensics"
+abstract: "SQLECmd maps and a desktop viewer for Microsoft Phone Link (formerly Your Phone) databases, with deleted-row carving, row relations, and USB cable and Bluetooth phone traces on Windows."
+type: software
+authors:
+  - family-names: Kotla
+    given-names: Avinash
+    alias: KotlaAvinash
+repository-code: "https://github.com/KotlaAvinash/phone-link-forensics"
+url: "https://github.com/KotlaAvinash/phone-link-forensics"
+license: MIT
+keywords:
+  - digital forensics
+  - DFIR
+  - Phone Link
+  - Your Phone
+  - SQLECmd
+  - SQLite
+  - Windows

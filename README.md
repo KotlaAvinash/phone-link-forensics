@@ -376,7 +376,7 @@ See [docs/TESTING.md](docs/TESTING.md) for how the maps were tested.
 
 Capability Access Manager (camera, microphone and location usage) maps are a separate tool: [sqlecmd-maps-capabilityaccessmanager](https://github.com/KotlaAvinash/sqlecmd-maps-capabilityaccessmanager).
 
-Changes are listed in [CHANGELOG.md](CHANGELOG.md). To contribute, read [CONTRIBUTING.md](CONTRIBUTING.md) (synthetic data only); to report a vulnerability, see [SECURITY.md](SECURITY.md).
+Changes are listed in [CHANGELOG.md](CHANGELOG.md). To contribute, read [CONTRIBUTING.md](CONTRIBUTING.md) (synthetic data only); to report a vulnerability, see [SECURITY.md](SECURITY.md). To cite this tool, use [CITATION.cff](CITATION.cff) (GitHub shows a "Cite this repository" button).
 
 ## Credits
 

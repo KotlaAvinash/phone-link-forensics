@@ -2,7 +2,8 @@
 
     python tests/stress.py C:\\Tools\\SQLECmd.exe [--calls 1000000 --photos 500000 --apps 20000]
 
-Reports wall time, peak memory (Windows, via the process's peak working set) and checks that
+Reports wall time, the highest sampled memory (resident set size via psutil, read every 0.1 s;
+"n/a" without psutil) and checks that
 every row and every icon came out.
 """
 import argparse
