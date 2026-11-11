@@ -159,9 +159,16 @@ class Demo(unittest.TestCase):
 
     def test_r25_sync_completeness(self):
         got = {r["Feed"]: r for r in self.view("R25")}
-        self.assertTrue(got["sms"]["Status"].startswith("INCOMPLETE"))
-        self.assertEqual(got["call_logs"]["Status"], "complete")
+        self.assertEqual(got["sms"]["Status"], "differs")
+        self.assertEqual(got["call_logs"]["Status"], "same")
         self.assertEqual(got["sms"]["RowsPresent"], 3)
+        self.assertEqual(self.g.views["R25"].problems, 1)         # only sms differs on the demo
+        v = self.g.views["R25"]
+        self.assertNotIn("INCOMPLETE", " ".join(str(r["Status"]) for r in v.rows))
+        self.assertNotIn("(received)", v.basis)
+        self.assertIn("sync counter", v.basis)
+        self.assertIn("not documented by Microsoft", v.basis)
+        self.assertEqual(v.cols[3:5], ["Sequence", "Expected"])                 # the stored column names, as is
 
     # ---- navigation
     def test_links_from_one_call(self):
@@ -605,8 +612,9 @@ class OddValues(unittest.TestCase):
                                     "phone.db": ["UPDATE content_sequence SET expected = 'many' WHERE content_type = 'sms'"]})
         got = {r["Feed"]: r for r in g.views["R25"].rows}
         self.assertEqual(got["call_logs"]["Sequence"], "abc")
-        self.assertNotEqual(got["call_logs"]["Status"], "complete")
-        self.assertEqual(got["conversation"]["Status"], "complete")
+        self.assertTrue(got["call_logs"]["Status"].startswith("cannot compare"))
+        self.assertEqual(got["conversation"]["Status"], "same")
+        self.assertEqual(g.views["R25"].problems, 0)         # nothing comparable differs; text values are not counted
 
     def test_text_call_duration(self):
         ev, g = build_edited(self, {"calling.db": ["UPDATE call_history SET duration = 'about a minute' WHERE call_id = 1"]})

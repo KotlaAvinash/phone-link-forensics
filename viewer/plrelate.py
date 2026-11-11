@@ -13,8 +13,8 @@ says how it was made:
   examiner  a join made by this tool across databases (for example a phone number
             matched on its last 10 digits) - an inference, never stored on the device
   time      events that overlap or happen close together - a lead, not a fact
-  integrity rows whose partner is missing, and feeds whose row count disagrees
-            with the sync bookmark
+  integrity rows whose partner is missing, and feeds whose two sync counters
+            (content_sequence sequence / expected, undocumented) differ
 
 Usage as a library:
     ev = Evidence(r"...\\System\\Database")      # stages and verifies copies
@@ -47,7 +47,7 @@ _PROJECT = [os.path.join(HERE, "..", "06-upstream-sqlecmd", "maps"),
             os.path.join(HERE, "..", "06-upstream-sqlecmd", "maps-upstream-yourphone")]
 DEFAULT_MAP_DIRS = _REPO if os.path.isdir(_REPO[1]) else _PROJECT
 
-# content_sequence.content_type -> (database, table) whose rows it counts
+# content_sequence.content_type -> (database, table) of that feed (R25 shows the table's row count beside it)
 FEEDS = {
     "sms": ("phone.db", "message"), "mms": ("phone.db", "mms"), "conversation": ("phone.db", "conversation"),
     "rcs_chat": ("phone.db", "rcs_chat"), "rcs_conversation": ("phone.db", "rcs_conversation"),
@@ -929,7 +929,9 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         "derived from R13-R18: parties with no contact match, and contacts no call or message points to",
         ["Finding", "Party", "Contact", "Calls", "SMS"], rows)
 
-    # R25 sync completeness
+    # R25 sync counters. content_sequence.sequence is NOT a count of rows received: on real data the sms value went
+    # 4 -> 8 between two syncs while 148 messages existed, so it behaves like a per-feed sync-round counter. What
+    # Microsoft means by it (and by expected) is not documented, so the two are only compared: same or differs.
     rows = []
     for db in P.DB_NAMES:
         for r in T(db, "content_sequence", ("content_type", "sequence", "expected")):
@@ -939,15 +941,18 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
             seq, exp = whole(r["sequence"]), whole(r["expected"])
             if seq is not None and exp is not None:
                 if seq >= 0 and exp >= 0:
-                    status = "complete" if seq == exp else "INCOMPLETE (sequence != expected)"
+                    status = "same" if seq == exp else "differs"
             elif r["sequence"] is not None and r["expected"] is not None:
                 status = "cannot compare (a value is not a number)"
             rows.append({"Database": db, "Feed": r["content_type"], "Table": table or "?", "Sequence": r["sequence"],
                          "Expected": r["expected"], "RowsPresent": present, "Status": status})
-    rel("R25", "Sync completeness per feed", "integrity",
-        "content_sequence.sequence (received) vs expected (phone's count) vs rows present now. Undocumented field: a"
-        " mismatch is a lead, not proof", ["Database", "Feed", "Table", "Sequence", "Expected", "RowsPresent", "Status"],
-        rows)
+    rel("R25", "Sync counters per feed", "integrity",
+        "content_sequence.sequence (sync counter) vs expected (expected counter) - meaning not documented by"
+        " Microsoft. The sequence is not a count of rows received (it behaves like a per-feed sync-round counter),"
+        " so 'differs' says only that the two counters are not equal, not that rows are missing. RowsPresent is the"
+        " feed table's row count now, for reference",
+        ["Database", "Feed", "Table", "Sequence", "Expected", "RowsPresent", "Status"], rows)
+    g.views["R25"].problems = sum(1 for r in rows if r["Status"] == "differs")
 
     # ---------- database + scope of every view
     DBOF = {"E_contacts": "contacts.db", "E_calls": "calling.db", "E_threads": "phone.db", "E_sms": "phone.db",
