@@ -113,11 +113,13 @@ class Build(unittest.TestCase):
         self.assertEqual(ev[0]["MatchedDevice"], self.g.label[dev])
 
     def test_phone_summary(self):
+        # one row per physical device: the USB phone and its MTP portable device share a ContainerID
         got = sorted((r["How"], r["Evidence"].split(" (")[0]) for r in self.rows("C_phones"))
         self.assertEqual(got, [("Bluetooth", "Bluetooth class of device = Phone"),
-                               ("USB cable", "MTP phone/camera driver"),
                                ("USB cable (MTP event 1005)", "MTP driver customized for this phone"),
-                               ("USB cable (MTP)", "same ContainerID as a USB phone")])
+                               ("USB cable; USB cable (MTP)", "MTP phone/camera driver; same ContainerID as a USB phone")])
+        self.assertIn("one row per physical device", self.g.views["C_phones"].title)
+        self.assertIn("one row per physical device", self.g.views["C_phones"].basis)
 
     def test_event_meanings_from_windows_text(self):
         ev = {(r["Log"], r["EventID"]): r for r in self.rows("C_events")}
@@ -184,8 +186,9 @@ class Composite(unittest.TestCase):
         usb = {r["SerialOrInstance"]: r for r in g.views["C_usb"].rows}
         self.assertIn("usbccgp", usb["R58N12345AB"]["PhoneEvidence"])
         rows = phones_of(g)
-        self.assertEqual(len(rows), 2)
-        self.assertEqual([r["Serial"] for r in rows], ["R58N12345AB", "R58N12345AB"])   # parent, and the MTP interface
+        self.assertEqual(len(rows), 1)                    # parent and MTP interface are one physical phone
+        self.assertEqual(rows[0]["Serial"], "R58N12345AB")
+        self.assertEqual(rows[0]["SeenAs"].count("USB cable:"), 2, rows[0]["SeenAs"])
 
     def test_parent_found_by_parent_id_prefix(self):
         keys = self.usb({"ParentIdPrefix": "7&2a3b4c5d&0"}, parent_cid="{e5e5e5e5-0000-4000-a000-000000000003}")
@@ -276,9 +279,44 @@ class PhysicalDevice(unittest.TestCase):
     def test_grouping_value_per_source(self):
         g = build_from(C.demo_source())
         by_how = {r["How"]: r for r in phones_of(g)}
-        self.assertEqual(by_how["USB cable"]["PhysicalDevice"], "{e5e5e5e5-0000-4000-a000-000000000001}")
-        self.assertEqual(by_how["USB cable (MTP)"]["PhysicalDevice"], by_how["USB cable"]["PhysicalDevice"])
+        self.assertEqual(by_how["USB cable; USB cable (MTP)"]["PhysicalDevice"], "{e5e5e5e5-0000-4000-a000-000000000001}")
         self.assertEqual(by_how["Bluetooth"]["PhysicalDevice"], "00:00:5E:00:53:01")
+
+    def test_one_row_per_physical_device_with_every_interface_and_time_range(self):
+        cid = "{e5e5e5e5-0000-4000-a000-000000000002}"
+        keys = keys_of(
+            (C.USB, None, ["VID_1234&PID_0F03", "VID_1234&PID_0F03&MI_00", "VID_1234&PID_0F03&MI_01"]),
+            (C.USB + r"\VID_1234&PID_0F03", None, ["TEST0001"]),
+            (C.USB + r"\VID_1234&PID_0F03\TEST0001", {"Service": "usbccgp", "ContainerID": cid}, []),
+            (C.USB + r"\VID_1234&PID_0F03&MI_00", None, ["7&2a3b4c5d&0&0000"]),
+            (C.USB + r"\VID_1234&PID_0F03&MI_00\7&2a3b4c5d&0&0000",
+             {"Service": "WUDFWpdMtp", "DeviceDesc": "Example MTP", "ContainerID": cid}, []),
+            (C.USB + r"\VID_1234&PID_0F03&MI_01", None, ["7&2a3b4c5d&0&0001"]),
+            (C.USB + r"\VID_1234&PID_0F03&MI_01\7&2a3b4c5d&0&0001",
+             {"Service": "Modem", "DeviceDesc": "Example Modem", "ContainerID": cid}, []))
+        text = "".join(f">>>  [Device Install (Hardware initiated) - {d}]\n>>>  Section start {t}.000\n" for d, t in (
+            ("USB\\VID_1234&PID_0F03\\TEST0001", "2030/01/02 10:00:00"),
+            ("USB\\VID_1234&PID_0F03&MI_01\\7&2a3b4c5d&0&0001", "2030/01/01 09:00:00")))
+        keys[(C.HKLM, C.USB + r"\VID_1234&PID_0F03&MI_01\7&2a3b4c5d&0&0001")]["lw"] = FT + 10 ** 10
+        g = build_from(C.FakeSource(keys, text))
+        rows = phones_of(g)
+        self.assertEqual(len(rows), 1, rows)
+        r = rows[0]
+        self.assertEqual(r["PhysicalDevice"], cid)
+        self.assertEqual(r["Serial"], "TEST0001")
+        self.assertIn("SeenAs", g.views["C_phones"].cols)
+        for what in ("composite parent", "MTP phone/camera driver", "phone modem interface"):
+            self.assertIn(what, r["SeenAs"])
+        self.assertEqual(r["FirstInstallUTC"], "2030-01-01 09:00:00")          # earliest across interfaces
+        self.assertEqual(r["KeyLastWriteUTC"], C.filetime(FT + 10 ** 10))      # latest across interfaces
+        self.assertEqual(len(g.views["C_usb"].rows), 3)                       # per-interface rows stay
+        linked = {t for rid, t, _ in g.links(r["_e"])}
+        self.assertEqual({t[0] for t in linked}, {"usb"})
+        self.assertEqual(len(linked), 3)
+
+    def test_rows_without_a_physical_id_stay_separate_and_say_so(self):
+        r = next(r for r in phones_of(build_from(C.demo_source())) if "1005" in r["How"])
+        self.assertIn("not grouped", r["SeenAs"])
 
     def test_event_1005_rows_are_not_one_physical_device(self):
         r = next(r for r in phones_of(build_from(C.demo_source())) if "1005" in r["How"])

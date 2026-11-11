@@ -312,6 +312,51 @@ def local_to_utc(s, logs_in_utc=False):
         return ""
 
 
+def _distinct(values):
+    out = []
+    for v in values:
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def summarize_phones(seen, g):
+    """One summary row per physical device from per-interface phone rows (`seen`). Rows that share a
+    PhysicalDevice are one device; a row without one stays on its own and says so. Each grouped row gets an
+    entity of its own, linked to every interface it was built from."""
+    groups, order = {}, []
+    for s in seen:
+        key = s["PhysicalDevice"] or ("", id(s))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(s)
+    out = []
+    for key in order:
+        members = groups[key]
+        first = lambda col: min((m[col] for m in members if m[col]), default="")   # noqa: E731
+        last = lambda col: max((m[col] for m in members if m[col]), default="")    # noqa: E731
+        seen_as = "; ".join(f"{m['How']}: {m['Device']} ({m['Evidence']})" for m in members)
+        if isinstance(key, tuple):
+            e = members[0]["_e"]
+            seen_as += " - no physical device id, not grouped with other rows"
+        else:
+            e = ("phonedevice", key)
+            device = next((m["Device"] for m in members if m["_named"]), members[0]["Device"])
+            g.label[e] = f"physical device {device} ({key})"
+            for m in members:
+                g.link("CR5", e, m["_e"], f"Same physical device ({key}): seen as {m['How']} - {m['Evidence']}")
+        out.append({"_e": e, "How": "; ".join(_distinct(m["How"] for m in members)),
+                    "Device": next((m["Device"] for m in members if m["_named"]), members[0]["Device"]),
+                    "PhysicalDevice": "" if isinstance(key, tuple) else key,
+                    "Serial": "; ".join(_distinct(m["Serial"] for m in members)), "Interfaces": len(members),
+                    "SeenAs": seen_as, "Evidence": "; ".join(_distinct(m["Evidence"] for m in members)),
+                    "FirstSeenUTC": first("FirstSeenUTC"), "LastConnectedUTC": last("LastConnectedUTC"),
+                    "LastSeenUTC": last("LastSeenUTC"), "FirstInstallUTC": first("FirstInstallUTC"),
+                    "KeyLastWriteUTC": last("KeyLastWriteUTC")})
+    return out
+
+
 # ---------------------------------------------------------------- build
 class _Guard:
     """Wrap a source so one failing read becomes an empty result plus a line in the 'could not read' view."""
@@ -624,9 +669,10 @@ def build(src, g, View):
         "rows that share a ContainerID - Windows' own id for one physical device", ["ContainerID", "Source", "Device"],
         rel, entity=False)
 
-    phone_containers = {container_of(r["ContainerID"]) for r in g.views["C_usb"].rows
-                        if r["PhoneEvidence"]} - {""}
-    phones = []
+    seen = []   # one entry per interface / source row that looks like a phone
+    parent_of_phone = {}
+    for child_e, par in usb_parent.items():
+        parent_of_phone.setdefault(par["_e"], next(r for r in g.views["C_usb"].rows if r["_e"] == child_e))
     for vid in ("C_usb", "C_wpd", "C_bt"):
         for r in g.views[vid].rows:
             why = r.get("PhoneEvidence") or ("Bluetooth class of device = Phone" if r.get("IsPhone") == "yes" else "") or \
@@ -635,36 +681,43 @@ def build(src, g, View):
             if why:
                 # the grouping key for one physical device: ContainerID, else Bluetooth address, else the device id
                 phys = container_of(r.get("ContainerID")) or r.get("Address") or r.get("InstanceID", "")
+                if r["_e"] in parent_of_phone:      # a composite parent is the same device as its phone interface
+                    child = parent_of_phone[r["_e"]]
+                    phys = container_of(child["ContainerID"]) or child["InstanceID"]
                 serial = ""
                 if vid == "C_usb":
                     owner = usb_parent.get(r["_e"], r)
                     serial = owner["SerialOrInstance"] if "&" not in owner["SerialOrInstance"] else ""
-                phones.append({"_e": r["_e"], "How": {"C_usb": "USB cable", "C_wpd": "USB cable (MTP)",
-                                                      "C_bt": "Bluetooth"}[vid], "Device": g.label[r["_e"]],
-                               "PhysicalDevice": phys, "Serial": serial, "Evidence": why,
-                               "LastConnectedUTC": r.get("LastConnectedUTC", ""),
-                               "LastSeenUTC": r.get("LastSeenUTC", ""),
-                               "KeyLastWriteUTC": r.get("KeyLastWriteUTC", ""),
-                               "FirstInstallUTC": r.get("FirstInstallUTC", ""), "FirstSeenUTC": ""})
+                seen.append({"_e": r["_e"], "_named": bool(r.get("Name")),
+                             "How": {"C_usb": "USB cable", "C_wpd": "USB cable (MTP)", "C_bt": "Bluetooth"}[vid],
+                             "Device": g.label[r["_e"]], "PhysicalDevice": phys, "Serial": serial, "Evidence": why,
+                             "LastConnectedUTC": r.get("LastConnectedUTC", ""), "LastSeenUTC": r.get("LastSeenUTC", ""),
+                             "KeyLastWriteUTC": r.get("KeyLastWriteUTC", ""),
+                             "FirstInstallUTC": r.get("FirstInstallUTC", ""), "FirstSeenUTC": ""})
     for reported, p in sorted(mtp_phones.items(), key=lambda kv: kv[1]["first"]):
         pe = ("mtpphone", reported)
         g.label[pe] = f"phone over USB (MTP): {reported}"
         for ee in p["events"]:
             g.link("CR4", pe, ee, "Stored link: this event 1005 names the phone")
-        phones.append({"_e": pe, "How": "USB cable (MTP event 1005)", "Device": reported,
-                       "PhysicalDevice": "", "Serial": "",   # make/model/OS only: not keyed as one physical device
-                       "Evidence": f"MTP driver customized for this phone ({p['n']} events, "
-                                   f"{p['first'][:10]} to {p['last'][:10]}); same make/model/OS \u2013 may be more "
-                                   f"than one phone",
-                       "LastConnectedUTC": p["last"], "LastSeenUTC": "", "FirstInstallUTC": "",
-                       "KeyLastWriteUTC": "", "FirstSeenUTC": p["first"]})
-    add("C_phones", "Phones connected to this PC (cable or Bluetooth) - summary",
-        "every row above that looks like a phone, with the evidence for it: a phone driver on USB, the MTP portable-"
-        "device driver, Bluetooth class of device = Phone, or an MTP event 1005 naming the phone's make, model and OS "
-        "version (this catches iPhones and other phones without a phone-specific driver). An empty LastConnected with a "
-        "LastSeen means Windows saw the phone but stored no connection time",
-        ["How", "Device", "PhysicalDevice", "Serial", "Evidence", "FirstSeenUTC", "LastConnectedUTC", "LastSeenUTC",
-         "FirstInstallUTC", "KeyLastWriteUTC"], phones)
+        seen.append({"_e": pe, "_named": True, "How": "USB cable (MTP event 1005)", "Device": reported,
+                     "PhysicalDevice": "", "Serial": "",   # make/model/OS only: not keyed as one physical device
+                     "Evidence": f"MTP driver customized for this phone ({p['n']} events, "
+                                 f"{p['first'][:10]} to {p['last'][:10]}); same make/model/OS \u2013 may be more "
+                                 f"than one phone",
+                     "LastConnectedUTC": p["last"], "LastSeenUTC": "", "FirstInstallUTC": "",
+                     "KeyLastWriteUTC": "", "FirstSeenUTC": p["first"]})
+    phones = summarize_phones(seen, g)
+    add("C_phones", "Phones connected to this PC (cable or Bluetooth) - summary, one row per physical device",
+        "one row per physical device: every row above that looks like a phone, grouped by PhysicalDevice (the "
+        "ContainerID, else the Bluetooth address, else the device id), so a phone seen as a USB composite device, its "
+        "MTP and modem interfaces and its portable device is one row. SeenAs lists each interface with its evidence; "
+        "times are the earliest (First...) and latest (Last..., KeyLastWrite) across them; the per-interface rows stay "
+        "in the views above. Rows with no physical device id (MTP event 1005) are not grouped and say so. Evidence: a "
+        "phone driver on USB, the MTP portable-device driver, Bluetooth class of device = Phone, or an MTP event 1005 "
+        "naming the phone's make, model and OS version (this catches iPhones and other phones without a phone-specific "
+        "driver). An empty LastConnected with a LastSeen means Windows saw the phone but stored no connection time",
+        ["How", "Device", "PhysicalDevice", "Serial", "Interfaces", "SeenAs", "Evidence", "FirstSeenUTC",
+         "LastConnectedUTC", "LastSeenUTC", "FirstInstallUTC", "KeyLastWriteUTC"], phones)
     unread = list(getattr(guarded, "denied", None) or []) + src.failed
     if unread:
         add("C_denied", "Locations this account could not read",
