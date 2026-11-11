@@ -1063,7 +1063,7 @@ def run(a, pkg_work):
             try:
                 ft_carved, st = plcarve.carve_db(ft_work)
                 ft_carve_stats = [st]
-            except (OSError, ValueError, sqlite3.Error) as e:
+            except Exception as e:   # noqa: BLE001 - a damaged file must not end the run for every device
                 ft_carve_error = ("carve failed on FullTrust/%s (package-wide): %s: %s"
                                   % (FULLTRUST_DB, type(e).__name__, e))
                 pkg_warnings.append(ft_carve_error)
@@ -1129,8 +1129,9 @@ def run(a, pkg_work):
                     for n, pth in dbs.items():
                         try:
                             rs, st = plcarve.carve_db(pth)
-                        except (OSError, ValueError, sqlite3.Error) as e:
-                            warnings.append("carve failed on %s: %s" % (n, e))
+                        except Exception as e:   # noqa: BLE001 - one damaged file must not end a multi-device run
+                            warnings.append("carve failed on %s: %s: %s - its deleted rows were not carved; the "
+                                            "other files were" % (n, type(e).__name__, e))
                             continue
                         carve_stats.append(st)
                         carved.extend(rs)

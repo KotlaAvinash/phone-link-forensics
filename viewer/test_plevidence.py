@@ -511,6 +511,73 @@ class JsonCarve(unittest.TestCase):
             self.assertEqual(sorted(keys), ["0|%s|302|null|10001" % JPKG, "0|%s|303|null|10001" % JPKG], notif)
 
 
+def make_truncated_in_trunk(path):
+    """A database with a long freelist, cut 16 bytes into its first freelist trunk page. Returns the trunk page."""
+    c = sqlite3.connect(path)
+    c.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds (e.g. Ubuntu's) default to secure_delete ON
+    c.execute("PRAGMA page_size = 1024")
+    c.execute("CREATE TABLE s (k TEXT, v TEXT)")
+    c.executemany("INSERT INTO s VALUES (?, ?)", [("k%d" % i, "example value %d " % i * 10) for i in range(200)])
+    c.commit()
+    c.execute("DELETE FROM s")
+    c.commit()
+    c.close()
+    data = read_bytes(path)
+    ps = plcarve.db_page_size(data)
+    trunk = int.from_bytes(data[32:36], "big")
+    leaves = int.from_bytes(data[(trunk - 1) * ps + 4:(trunk - 1) * ps + 8], "big")
+    assert trunk and leaves >= 3, "fixture: the trunk page must list several leaf pages"
+    with open(path, "wb") as fh:
+        fh.write(data[:(trunk - 1) * ps + 16])
+    return trunk
+
+
+class TruncatedDatabase(unittest.TestCase):
+    def test_carving_a_file_cut_inside_a_freelist_trunk_page_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "settings.db")
+            trunk = make_truncated_in_trunk(path)
+            data = read_bytes(path)
+            fl = plcarve.free_pages(data, plcarve.db_page_size(data))
+            self.assertIn(trunk, fl)
+            self.assertLessEqual(len(fl), 3)            # only the leaf entries that are really in the file: 2
+            recs, st = plcarve.carve_db(path)
+            self.assertIsInstance(recs, list)
+
+    def test_one_bad_file_does_not_stop_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dev = os.path.join(tmp, "dev")
+            make_device(dev)                                       # a good settings.db
+            make_truncated_in_trunk(os.path.join(dev, "calling.db"))
+            out = os.path.join(tmp, "out")
+            rc, _ = run_main(["--input", dev, "--out", out, "--carve"])
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.isfile(os.path.join(out, "dev", "report.html")))
+
+    def test_any_carve_error_becomes_a_warning_naming_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dev = os.path.join(tmp, "dev")
+            make_device(dev)
+            make_deleted_notes(os.path.join(dev, "calling.db"), [("t", "kept note %d" % i) for i in range(30)])
+            real = plcarve.carve_db
+
+            def carve(path, *a, **k):
+                if os.path.basename(path) == "settings.db":
+                    raise RuntimeError("unexpected decoder failure")
+                return real(path, *a, **k)
+            plcarve.carve_db = carve
+            try:
+                rc, _ = run_main(["--input", dev, "--out", os.path.join(tmp, "out"), "--carve"])
+            finally:
+                plcarve.carve_db = real
+            self.assertEqual(rc, 0)
+            acq = read_acq(os.path.join(tmp, "out"), "dev")
+            w = [x for x in acq["warnings"] if "settings.db" in x and "unexpected decoder failure" in x]
+            self.assertTrue(w, acq["warnings"])
+            self.assertIn("RuntimeError", w[0])
+            self.assertGreater(acq["counts"]["carved candidates"], 0)     # the other file was still carved
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

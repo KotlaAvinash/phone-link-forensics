@@ -117,7 +117,8 @@ def free_pages(data, ps):
             break
         out.add(trunk)
         nxt, cnt = struct.unpack(">II", data[off:off + 8])
-        cnt = min(cnt, (ps - 8) // 4)
+        # a damaged count can claim more entries than a page holds, and a truncated file can end inside the page
+        cnt = max(0, min(cnt, (ps - 8) // 4, (len(data) - off - 8) // 4))
         for i in range(cnt):
             p = struct.unpack(">I", data[off + 8 + i * 4: off + 12 + i * 4])[0]
             if p:
