@@ -40,7 +40,7 @@ READ THIS BEFORE USING THE OUTPUT
 Stdlib only. Opens evidence read-only, byte-wise; never through SQLite.
 """
 
-import os, re, struct, sqlite3
+import json, os, re, struct, sqlite3
 
 # ------------------------------------------------------------------ varint
 def varint(buf, off):
@@ -369,8 +369,155 @@ def live_rowids(db_path, table, errors=None):
             c.close()
 
 
-def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False):
-    """Carve one database. Returns (records, stats)."""
+# ------------------------------------------------------------------ notification json (record header lost)
+JSON_STATUS = "json-carved (record header lost)"
+JSON_CONFIDENCE = ("only the json text survived: the SQLite record header (and with it rowid, notification_id, "
+                   "package_name, post_time, state) was overwritten, so these columns are unknown. Accepted because "
+                   "the bytes form one complete JSON object that parses and holds packageName and key; which row it "
+                   "was, and when it was deleted, cannot be told")
+JSON_TIME_BASIS = "json postTime (Unix ms) - the post_time column (FILETIME) did not survive"
+_PKG_RE = re.compile(rb'"packageName"\s*:')
+_JSON = json.JSONDecoder()
+JSON_MAX_TRIES = 64          # '{' positions tried backwards from one "packageName"
+
+
+def json_objects(buf):
+    """(offset, json text, dict) for every complete JSON object in buf that holds packageName and key.
+
+    Anchored on each "packageName": the '{' before it are tried nearest first, and the first one that opens a
+    complete object spanning the anchor, parsing to a dict with packageName and key, is taken (a nested object
+    without key is passed over for the one around it). The bytes must be valid UTF-8 and json-strict (no raw
+    control characters), so overwritten or cut-off text is not accepted."""
+    out, last_end = [], -1
+    for m in _PKG_RE.finditer(buf):
+        hit = m.start()
+        if hit < last_end:
+            continue                              # inside the object already taken
+        pos = hit
+        for _ in range(JSON_MAX_TRIES):
+            s = buf.rfind(b"{", 0, pos)
+            if s < 0:
+                break
+            pos = s
+            win = bytes(buf[s:]).decode("utf-8", "surrogateescape")
+            try:
+                obj, end = _JSON.raw_decode(win)
+            except ValueError:
+                continue
+            raw = win[:end].encode("utf-8", "surrogateescape")
+            if s + len(raw) <= hit or not isinstance(obj, dict) or "packageName" not in obj or "key" not in obj:
+                continue
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            out.append((s, text, obj))
+            last_end = s + len(raw)
+            break
+    return out
+
+
+def json_identity(o):
+    """Same notification version: json key + Android id + postTime. Another postTime under the same key is another
+    version of the notification (the app updated it), so it is kept, not merged."""
+    return (str(o.get("key")), str(o.get("id")), str(o.get("postTime")))
+
+
+def has_notification_json(shapes):
+    return any(nm == "notifications" and "json" in cols for lst in shapes.values() for nm, cols, _ in lst)
+
+
+def _live_json(db_path, errors):
+    """json of every live notifications row, or None when they could not be read."""
+    c = None
+    try:
+        c = sqlite3.connect(_ro(db_path), uri=True)
+        return [r[0] for r in c.execute('SELECT json FROM "notifications"')]
+    except Exception as e:
+        errors.append("live json of 'notifications': %s: %s" % (type(e).__name__, e))
+        return None
+    finally:
+        if c is not None:
+            c.close()
+
+
+def _region_of(buf, ps, pno, fl, off, hdr_offset=None):
+    """Dead-space kind holding byte offset off of page pno, or 'cell-area' when it is in none."""
+    for kind, start, ln in page_regions(buf, ps, pno, fl, hdr_offset):
+        if start <= off < start + ln:
+            return kind
+    return "cell-area"
+
+
+def _ms_utc(v):
+    """postTime is Unix milliseconds."""
+    try:
+        v = int(v)
+        if v <= 0:
+            return ""
+        from datetime import datetime, timedelta, timezone
+        return (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=v)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
+def carve_notification_json(db_path, data, ps, fl, include_wal, carved, errors):
+    """Schema-specific pass for notifications.db (+ -wal): notification json whose record header was overwritten.
+
+    Scans every page of the file and every WAL frame for complete json objects, and keeps those not already
+    present as a live row or as a record the record carver recovered (same key + id + postTime), each once."""
+    seen = set()
+    live = _live_json(db_path, errors)
+    for js in (live or []) + [r.get("json") for r in carved if r.get("table") == "notifications"]:
+        try:
+            o = json.loads(js)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(o, dict):
+            seen.add(json_identity(o))
+    out = []
+
+    def take(text, o, src, pno, region, off, frame=None):
+        ident = json_identity(o)
+        if ident in seen:
+            return
+        seen.add(ident)
+        rec = {"table": "notifications", "type_fit": "", "candidates": "json pass", "source_file": src,
+               "page": pno, "region": "json-" + region, "offset": off, "rowid": None, "cols": "",
+               "notification_id": None, "package_name": None, "json": text, "post_time": None,
+               "state": None, "anonymous_id": None, "status": JSON_STATUS,
+               "json_package": o.get("packageName"), "json_key": o.get("key"),
+               "json_post_time_utc": _ms_utc(o.get("postTime")), "time_basis": JSON_TIME_BASIS,
+               "confidence": JSON_CONFIDENCE}
+        if frame is not None:
+            rec["wal_frame"] = frame
+        if live is None:
+            rec["live_check"] = "live rows unreadable - this may be a live row"
+        out.append(rec)
+
+    name = os.path.basename(db_path)
+    for pno in range(1, len(data) // ps + 1):
+        base = (pno - 1) * ps
+        for off, text, o in json_objects(data[base:base + ps]):
+            take(text, o, name, pno, _region_of(data, ps, pno, fl, base + off), base + off)
+    if include_wal:
+        wp = db_path + "-wal"
+        wps = ps
+        for idx, pno, page in wal_frames(wp, ps):
+            wps = len(page)
+            frame_data = 32 + idx * (24 + wps) + 24      # where this page image starts in the -wal file
+            for off, text, o in json_objects(page):
+                hdr = 100 if pno == 1 else 0
+                take(text, o, os.path.basename(wp), pno, _region_of(page, wps, 1, set(), off, hdr),
+                     frame_data + off, idx)
+    return out
+
+
+def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json_pass=True):
+    """Carve one database. Returns (records, stats).
+
+    json_pass: for a database with a notifications.json column, also recover notification json whose record header
+    was overwritten (carve_notification_json); such rows have status JSON_STATUS."""
     with open(db_path, "rb") as fh:
         data = fh.read()
     ps = db_page_size(data)
@@ -426,6 +573,11 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False):
         else:
             r["status"] = "also_live" if r["rowid"] in live_cache[t] else "deleted_or_overwritten"
         uniq.append(r)
+    stats["json_carved"] = 0
+    if json_pass and has_notification_json(shapes):
+        jr = carve_notification_json(db_path, data, ps, fl, include_wal, uniq, stats["errors"])
+        stats["json_carved"] = len(jr)
+        uniq += jr
     stats["records"] = len(uniq)
     stats["deleted_only"] = sum(1 for r in uniq if r["status"] != "also_live")
     return (uniq, stats)

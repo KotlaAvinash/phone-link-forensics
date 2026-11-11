@@ -14,6 +14,15 @@ also carved with plcarve and the recovered rows are shown with Source = deleted.
 anything survives depends on the bytes left in the file, not on PRAGMA secure_delete: that
 pragma reports the analysing connection's setting and is not stored in the evidence file.
 
+When a deleted row's SQLite record header has been overwritten (a freed cell becomes a freeblock and its first
+bytes are reused), the record carver cannot recognise it, but the json text often survives whole. plcarve's
+json pass (carve_notification_json) recovers those objects; they are shown with Source = deleted, a CarvedFrom
+that says "json-carved (record header lost)", no RowID / NotificationID / post_time (the columns are gone), and
+the time taken from json postTime.
+
+TIMES. The post_time column is Windows FILETIME; json postTime and timestamp are Unix milliseconds. Each is
+decoded by its own rule, and TimeBasis says which one the row's time came from.
+
 Decodes marked [published] follow the Android API reference (Notification.flags,
 NotificationManager importance, Notification priority, StatusBarNotification.getKey).
 Everything else is shown raw.
@@ -48,7 +57,8 @@ JSON_COLS = [  # (output column, json key)
     ("IsClearable", "isClearable"), ("ShowWhen", "showWhen"), ("Version", "version"), ("Platform", "platform"),
     ("NotificationClass", "notificationClass"), ("FeatureFlags", "featureFlags"), ("JSONPackage", "packageName"),
 ]
-COLS = (["Source", "RowID", "NotificationID", "Package", "PostTimeUTC", "JSONPostTimeUTC", "JSONTimestampUTC"]
+COLS = (["Source", "RowID", "NotificationID", "Package", "PostTimeUTC", "JSONPostTimeUTC", "JSONTimestampUTC",
+         "TimeBasis"]
         + [c for c, _ in JSON_COLS[:9]]
         + ["Messages", "Senders", "Actions", "InlineReply", "Importance", "Priority", "Flags"]
         + [c for c, _ in JSON_COLS[9:]]
@@ -105,6 +115,30 @@ CUT_NOTE = "value cut - rest was on overflow pages (not read)"
 CUT_STATUS = "cut off at an overflow page boundary - the rest was not read"
 
 
+def column_rule(v):
+    """How the post_time column was read (same magnitude rule as ts_seconds): Phone Link writes Windows FILETIME."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if v > 10 ** 16:
+        return "Windows FILETIME"
+    if v > 10 ** 11:
+        return "Unix ms"
+    if v > 10 ** 8:
+        return "Unix s"
+    return ""
+
+
+def json_ms(v):
+    """json postTime / timestamp: Unix milliseconds -> Unix seconds, None when not a positive number."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return v / 1000 if v > 0 else None
+
+
 def parse_json(text, cut=False):
     """(dict, status). Carved JSON can be cut off; keep whatever parses. cut: the carver stopped this record at
     an overflow boundary, so a json that fails to parse was cut there, not damaged."""
@@ -144,6 +178,12 @@ def build(ev, g, View, ts_seconds, iso):
                                "request_expiration_time"))]
     for c in recs:
         where = f"{c.get('source_file')} page {c.get('page')} {c.get('region')} @{c.get('offset')}"
+        if c.get("status") == plcarve.JSON_STATUS:
+            if c.get("wal_frame") is not None:
+                where += f" (WAL frame {c['wal_frame']}; offset is in the -wal file)"
+            where += f" - {plcarve.JSON_STATUS}: {c.get('confidence', '')}"
+            if c.get("live_check"):
+                where += f" - {c['live_check']}"
         if c["table"] == "notifications" and c.get("status") != "also_live":
             raw.append(("deleted", c.get("rowid"), c, where))
         elif c["table"] == "notification_toastmappings" and c.get("status") != "also_live":
@@ -164,11 +204,21 @@ def build(ev, g, View, ts_seconds, iso):
         senders = o.get("senderNames") if isinstance(o.get("senderNames"), list) else []
         actions = o.get("notificationActions") if isinstance(o.get("notificationActions"), list) else []
         k = decode_key(o.get("key"))
+        json_only = r.get("status") == plcarve.JSON_STATUS
         t_col = ts_seconds(r.get("post_time"))
-        row = {"_e": e, "_json": o, "Source": source, "RowID": rowid, "NotificationID": r.get("notification_id"),
-               "Package": r.get("package_name"), "PostTimeUTC": iso(t_col),
-               "JSONPostTimeUTC": iso(ts_seconds(o.get("postTime"))),
-               "JSONTimestampUTC": iso(ts_seconds(o.get("timestamp"))),
+        t_json = json_ms(o.get("postTime"))
+        if t_col is not None:
+            basis = f"post_time column ({column_rule(r.get('post_time'))})"
+        elif t_json is not None:
+            basis = "json postTime (Unix ms)" + (" - the post_time column did not survive" if json_only else
+                                                 " - the post_time column is empty or unreadable")
+        else:
+            basis = ""
+        row = {"_e": e, "_json": o, "_json_only": json_only, "Source": source, "RowID": rowid,
+               "NotificationID": r.get("notification_id"),
+               "Package": r.get("package_name") or (o.get("packageName") if json_only else None),
+               "PostTimeUTC": iso(t_col), "JSONPostTimeUTC": iso(t_json),
+               "JSONTimestampUTC": iso(json_ms(o.get("timestamp"))), "TimeBasis": basis,
                "Messages": len(msgs), "Senders": " | ".join(str(s) for s in senders if s),
                "Actions": " | ".join(str(a.get("actionName", "")) for a in actions if isinstance(a, dict)),
                "InlineReply": "yes" if any(isinstance(a, dict) and a.get("isActionInlineReply") for a in actions)
@@ -182,8 +232,9 @@ def build(ev, g, View, ts_seconds, iso):
             v = o.get(key)
             row[col] = cell(v)
         rows.append(row)
-        g.time[e] = t_col or ts_seconds(o.get("postTime"))
-        g.label[e] = f"{source} notification: {row['AppName'] or row['Package']} - {row['Title'] or ''}".strip()
+        g.time[e] = t_col or t_json
+        what = "deleted (json only)" if json_only else source
+        g.label[e] = f"{what} notification: {row['AppName'] or row['Package']} - {row['Title'] or ''}".strip()
         for i, m in enumerate(msgs):
             sender = senders[i] if i < len(senders) else ""
             me = ("notifmsg", f"{e[1]}:{i}")
@@ -311,8 +362,14 @@ def build(ev, g, View, ts_seconds, iso):
             rel.append({"_e": r["_e"], "Row": g.label[r["_e"]], "Check": "json readable",
                         "Result": r["JSONStatus"]})
             continue
-        checks = [("package_name column = json packageName", r["Package"] == o.get("packageName")),
-                  ("package_name = package in json key", not r["KeyPackage"] or r["Package"] == r["KeyPackage"])]
+        if r["_json_only"]:   # no plain column survived to compare; the json is still checked against itself
+            checks = [("json packageName = package in json key",
+                       not r["KeyPackage"] or o.get("packageName") == r["KeyPackage"])]
+            rel.append({"_e": r["_e"], "Row": g.label[r["_e"]], "Check": "plain columns vs json",
+                        "Result": "not checked - only the json survived (record header lost)"})
+        else:
+            checks = [("package_name column = json packageName", r["Package"] == o.get("packageName")),
+                      ("package_name = package in json key", not r["KeyPackage"] or r["Package"] == r["KeyPackage"])]
         try:
             fl = int(o.get("flags"))
             if "isOngoing" in o:

@@ -343,6 +343,174 @@ class CarveNeverCrashes(unittest.TestCase):
             os.remove(path)
 
 
+FILETIME_UNIX_S = 11644473600          # seconds from 1601-01-01 to 1970-01-01
+
+
+def filetime_from_ms(unix_ms):
+    """The same instant as Windows FILETIME (100 ns ticks since 1601), as the notifications.post_time column holds it."""
+    return (unix_ms + FILETIME_UNIX_S * 1000) * 10_000
+
+
+def varint_len(v):
+    n = 1
+    while v >= 0x80:
+        v >>= 7
+        n += 1
+    return n
+
+
+JPKG = "com.example.chat"
+
+
+def json_note(i, minute):
+    """(notification_id, json text, postTime ms) of one synthetic notification with its own key."""
+    post_ms = pldemo.ms(pldemo.at(minute)) + 456          # postTime is Unix MILLISECONDS
+    js = pldemo.njson(JPKG, "0|%s|%d|null|10001" % (JPKG, 300 + i), minute, id=300 + i, postTime=post_ms,
+                      timestamp=post_ms, title="json only %d" % i, text="recovered text %d" % i)
+    return "j-%d" % i, js, post_ms
+
+
+def make_header_lost_notifications(path, live=(0, 1), dead=(2, 3, 4, 5)):
+    """notifications.db: every row on one page; the dead rows are deleted (secure_delete OFF), then the start of each
+    freed cell - its record header and the leading columns - is overwritten in the file, so a record carver cannot
+    recognise them. The json text of each dead row is left intact. Returns {i: (nid, json, postTime ms)}."""
+    notes = {i: json_note(i, 10 + i) for i in tuple(live) + tuple(dead)}
+    c = sqlite3.connect(path)
+    c.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds (e.g. Ubuntu's) default to secure_delete ON
+    for s in pldemo.DDL["notifications.db"]:
+        c.execute(s)
+    for i in sorted(notes):
+        nid, js, post_ms = notes[i]
+        c.execute("INSERT INTO notifications (id, notification_id, package_name, json, post_time) VALUES (?, ?, ?, ?, ?)",
+                  (i + 1, nid, JPKG, js, filetime_from_ms(post_ms)))
+    c.commit()
+    c.executemany("DELETE FROM notifications WHERE notification_id = ?", [(notes[i][0],) for i in dead])
+    c.commit()
+    c.close()
+    data = bytearray(read_bytes(path))
+    for i in dead:
+        nid, js, post_ms = notes[i]
+        body = (nid + JPKG + js).encode()
+        off = data.find(body)
+        assert off > 0 and data.find(body, off + 1) < 0, "fixture: the freed cell must be on disk exactly once"
+        # record header: NULL id, 3 texts, 8-byte FILETIME, state 0 (serial 8), NULL anonymous_id
+        types = [0, 13 + 2 * len(nid), 13 + 2 * len(JPKG), 13 + 2 * len(js.encode()), 6, 8, 0]
+        hsz = 1 + sum(varint_len(t) for t in types)
+        payload = hsz + len(body) + 8
+        start = off - hsz - varint_len(i + 1) - varint_len(payload)
+        # keep the first 4 bytes (SQLite may have written a freeblock header there), wipe the rest up to the json
+        data[start + 4: off + len(nid) + len(JPKG)] = bytes(off + len(nid) + len(JPKG) - start - 4)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return notes
+
+
+def iso_ms(unix_ms):
+    return R.iso(unix_ms / 1000)
+
+
+class JsonCarve(unittest.TestCase):
+    """Notification json that survives in dead space after its SQLite record header was overwritten."""
+
+    def test_record_carver_alone_misses_them_and_the_json_pass_finds_each_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "notifications.db")
+            notes = make_header_lost_notifications(path)
+            data = read_bytes(path)
+            recs, st = plcarve.carve_db(path)
+            notif = [r for r in recs if r["table"] == "notifications" and r["status"] != "also_live"]
+            self.assertTrue(notif, st)
+            # no deleted row came from the record carver: the headers are gone
+            self.assertEqual({r["status"] for r in notif}, {plcarve.JSON_STATUS})
+            self.assertEqual(plcarve.JSON_STATUS, "json-carved (record header lost)")
+            keys = sorted(json.loads(r["json"])["key"] for r in notif)
+            self.assertEqual(keys, sorted("0|%s|%d|null|10001" % (JPKG, 300 + i) for i in (2, 3, 4, 5)))
+            for r in notif:
+                o = json.loads(r["json"])
+                i = o["id"] - 300
+                self.assertEqual(r["json"], notes[i][1])                         # the whole object, nothing more
+                self.assertEqual(data[r["offset"]:r["offset"] + len(r["json"])], r["json"].encode())
+                self.assertEqual(r["source_file"], "notifications.db")
+                self.assertTrue(r["region"].startswith("json-"), r["region"])
+                self.assertIsNone(r["rowid"])
+                self.assertIsNone(r["post_time"])                                # the column did not survive
+                self.assertEqual(r["json_post_time_utc"], iso_ms(notes[i][2]))
+                self.assertIn("Unix ms", r["time_basis"])
+                self.assertIn("record header", r["confidence"])
+            self.assertEqual(st["json_carved"], 4)
+
+    def test_views_show_each_once_with_the_right_times(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pldemo.build(os.path.join(tmp, "device"))
+            os.remove(os.path.join(src, "notifications.db"))
+            notes = make_header_lost_notifications(os.path.join(src, "notifications.db"))
+            ev = R.Evidence(src)
+            try:
+                g = R.build(ev)
+            finally:
+                ev.close()
+            rows = g.views["N_notifications"].rows
+            self.assertIn("TimeBasis", g.views["N_notifications"].cols)
+            got = sorted((r["Source"], r["Key"]) for r in rows)
+            self.assertEqual(got, sorted([("live", "0|%s|%d|null|10001" % (JPKG, 300 + i)) for i in (0, 1)]
+                                         + [("deleted", "0|%s|%d|null|10001" % (JPKG, 300 + i)) for i in (2, 3, 4, 5)]))
+            for r in rows:
+                i = int(r["AndroidID"]) - 300
+                want = iso_ms(notes[i][2])
+                self.assertEqual(r["JSONPostTimeUTC"], want)
+                if r["Source"] == "live":
+                    self.assertEqual(r["PostTimeUTC"], want)                    # FILETIME column decoded as FILETIME
+                    self.assertIn("FILETIME", r["TimeBasis"])
+                else:
+                    self.assertEqual(r["PostTimeUTC"], "")
+                    self.assertIn("json postTime", r["TimeBasis"])
+                    self.assertIn("Unix ms", r["TimeBasis"])
+                    self.assertIn(plcarve.JSON_STATUS, r["CarvedFrom"])
+                    self.assertEqual(r["Package"], JPKG)
+                    self.assertEqual(r["JSONStatus"], "parsed")
+                    self.assertEqual(g.time[r["_e"]], notes[i][2] / 1000)        # on the timeline at postTime
+            timeline = [x for x in g.views["R22"].rows if x["Kind"] == "notif"]
+            self.assertEqual(len(timeline), 6)
+            nr4 = [x for x in g.views["NR4"].rows if "json only" in x["Row"] and "deleted" in x["Row"]]
+            self.assertFalse([x for x in nr4 if x["Result"] == "DISAGREES"], nr4)
+
+    def test_wal_copies_are_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_dir, copy_dir = os.path.join(tmp, "live"), os.path.join(tmp, "copy")
+            os.makedirs(live_dir)
+            os.makedirs(copy_dir)
+            path = os.path.join(live_dir, "notifications.db")
+            w = sqlite3.connect(path)
+            try:
+                w.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds default to secure_delete ON
+                w.execute("PRAGMA journal_mode=WAL")
+                w.execute("PRAGMA wal_autocheckpoint=0")
+                for s in pldemo.DDL["notifications.db"]:
+                    w.execute(s)
+                w.commit()
+                notes = {i: json_note(i, 10 + i) for i in range(6)}
+                for i in range(6):                     # one commit per row: the same page lands in the WAL many times
+                    nid, js, post_ms = notes[i]
+                    w.execute("INSERT INTO notifications (notification_id, package_name, json, post_time)"
+                              " VALUES (?, ?, ?, ?)", (nid, JPKG, js, filetime_from_ms(post_ms)))
+                    w.commit()
+                w.execute("DELETE FROM notifications WHERE notification_id IN ('j-2', 'j-3')")
+                w.commit()
+                for suf in ("", "-wal", "-shm"):
+                    shutil.copyfile(path + suf, os.path.join(copy_dir, "notifications.db" + suf))
+            finally:
+                w.close()
+            recs, st = plcarve.carve_db(os.path.join(copy_dir, "notifications.db"))
+            notif = [r for r in recs if r["table"] == "notifications" and r["status"] != "also_live"]
+            keys = []
+            for r in notif:
+                try:
+                    keys.append(json.loads(r["json"])["key"])
+                except (ValueError, KeyError, TypeError):
+                    pass
+            self.assertEqual(sorted(keys), ["0|%s|302|null|10001" % JPKG, "0|%s|303|null|10001" % JPKG], notif)
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
