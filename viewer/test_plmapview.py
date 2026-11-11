@@ -12,6 +12,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import pldemo  # noqa: E402
+import plfilter as F  # noqa: E402
 import plmapview as V  # noqa: E402
 
 
@@ -809,6 +810,312 @@ class DemoRedactionTest(unittest.TestCase):
                 self.assertIn("empty-case", shown[0])
             finally:
                 app.on_close(warn=False)
+
+
+# ==================================================================== plfilter: pure sorting and filtering logic
+class FilterParseTest(unittest.TestCase):
+    def test_blank_is_empty_or_none_only(self):
+        for b in (None, "", b""):
+            self.assertTrue(F.is_blank(b), repr(b))
+        for nb in (" ", "‎", 0, "0", "x"):
+            self.assertFalse(F.is_blank(nb), repr(nb))
+
+    def test_parse_number(self):
+        for text, want in (("1,234", 1234.0), ("-5", -5.0), ("3.14", 3.14), (12, 12.0), (2.5, 2.5), ("+7", 7.0),
+                           (" 42 ", 42.0), ("1,234,567.5", 1234567.5), ("-0.5", -0.5)):
+            self.assertEqual(F.parse_number(text), want, repr(text))
+        for bad in ("", None, "abc", "+1-555-0101", "1,23", "12a", "1.2.3", "inf", "nan", "1e5x", True):
+            self.assertIsNone(F.parse_number(bad), repr(bad))
+
+    def test_parse_time_formats(self):
+        from datetime import datetime
+        want = datetime(2030, 9, 22, 11, 22, 12)
+        for text in ("2030-09-22 11:22:12", "2030-09-22T11:22:12", "2030-09-22T11:22:12Z", "2030-09-22 11:22:12Z",
+                     "2030-09-22T11:22:12+05:30", "2030-09-22 11:22:12 (no zone)", "2030-09-22T11:22:12-0700",
+                     " 2030-09-22 11:22:12 "):
+            self.assertEqual(F.parse_time(text), want, text)     # as written: the offset is not applied
+        self.assertEqual(F.parse_time("2030-09-22 11:22:12.123"), datetime(2030, 9, 22, 11, 22, 12, 123000))
+        self.assertEqual(F.parse_time("2030-09-22T11:22:12.1234567Z"), datetime(2030, 9, 22, 11, 22, 12, 123456))
+        self.assertEqual(F.parse_time("2030-09-22"), datetime(2030, 9, 22))
+        self.assertEqual(F.parse_time("2030-09-22 11:22"), datetime(2030, 9, 22, 11, 22))
+        for bad in ("", None, "2030-13-01 00:00:00", "2030-02-30", "yesterday", "22/09/2030", 1900000000, "2030-09"):
+            self.assertIsNone(F.parse_time(bad), repr(bad))
+
+    def test_parse_when_gives_the_span_of_what_was_typed(self):
+        from datetime import datetime
+        self.assertEqual(F.parse_when("2030-09-15"), (datetime(2030, 9, 15), datetime(2030, 9, 16)))
+        self.assertEqual(F.parse_when("2030-09-15 10:30"), (datetime(2030, 9, 15, 10, 30), datetime(2030, 9, 15, 10, 31)))
+        self.assertEqual(F.parse_when("2030-09-15T10:30:05"),
+                         (datetime(2030, 9, 15, 10, 30, 5), datetime(2030, 9, 15, 10, 30, 6)))
+        self.assertEqual(F.parse_when("2030-12-31"), (datetime(2030, 12, 31), datetime(2031, 1, 1)))
+        for bad in ("", "15/09/2030", "2030-09-31", "soon"):
+            self.assertIsNone(F.parse_when(bad), bad)
+
+    def test_type_detection(self):
+        self.assertEqual(F.detect_type(["2030-09-22 11:22:12", "2030-09-23 10:00:00.5", "", None], "StartUTC"), F.DATE)
+        self.assertEqual(F.detect_type(["2030-09-22T11:22:12Z"] * 3, "When"), F.DATE)
+        self.assertEqual(F.detect_type(["1", "2", "1,234", 7, None], "Count"), F.NUMBER)
+        self.assertEqual(F.detect_type(["Alice", "Bob", "12"], "Name"), F.TEXT)
+        self.assertEqual(F.detect_type(["+1-555-0101", "+1-555-0102"], "Number"), F.TEXT)
+        self.assertEqual(F.detect_type([None, ""], "LastSeenUTC"), F.DATE)       # empty: the name decides
+        self.assertEqual(F.detect_type([None, ""], "Name"), F.TEXT)
+        # a time-named column that is mostly times is a date column even with a few odd cells
+        self.assertEqual(F.detect_type(["2030-09-22 11:22:12"] * 6 + ["unknown"] * 4, "PostTimeUTC"), F.DATE)
+        self.assertEqual(F.detect_type(["2030-09-22 11:22:12"] * 6 + ["unknown"] * 4, "Notes"), F.TEXT)
+
+    def test_sort_labels_follow_the_type_like_excel(self):
+        self.assertEqual(F.sort_labels(F.TEXT), ("Sort A → Z", "Sort Z → A"))
+        self.assertEqual(F.sort_labels(F.NUMBER), ("Sort Smallest → Largest", "Sort Largest → Smallest"))
+        self.assertEqual(F.sort_labels(F.DATE), ("Sort Oldest → Newest", "Sort Newest → Oldest"))
+
+
+class FilterSortTest(unittest.TestCase):
+    def order(self, values, ctype, desc=False):
+        rows = [{"c": v} for v in values]
+        return [rows[i]["c"] for i in F.sort_indices(range(len(rows)), rows, "c", ctype, desc)]
+
+    def test_blanks_last_in_both_directions(self):
+        vals = ["b", None, "a", "", "c"]
+        self.assertEqual(self.order(vals, F.TEXT), ["a", "b", "c", None, ""])
+        self.assertEqual(self.order(vals, F.TEXT, True), ["c", "b", "a", None, ""])
+        nums = [3, None, "1,234", "", 2]
+        self.assertEqual(self.order(nums, F.NUMBER), [2, 3, "1,234", None, ""])
+        self.assertEqual(self.order(nums, F.NUMBER, True), ["1,234", 3, 2, None, ""])
+
+    def test_text_is_case_insensitive_natural_order(self):
+        vals = ["img10.jpg", "IMG2.jpg", "img1.jpg", "Bob", "alice", "Alice"]
+        self.assertEqual(self.order(vals, F.TEXT), ["alice", "Alice", "Bob", "img1.jpg", "IMG2.jpg", "img10.jpg"])
+
+    def test_numbers_numerically_and_dates_chronologically(self):
+        self.assertEqual(self.order(["10", "9", "1,000", "-1", "2.5"], F.NUMBER), ["-1", "2.5", "9", "10", "1,000"])
+        dates = ["2030-09-22 11:22:12", "2030-01-02 03:04:05 (no zone)", "2030-09-22T11:22:12.5Z", "2029-12-31"]
+        self.assertEqual(self.order(dates, F.DATE),
+                         ["2029-12-31", "2030-01-02 03:04:05 (no zone)", "2030-09-22 11:22:12", "2030-09-22T11:22:12.5Z"])
+        self.assertEqual(self.order(dates, F.DATE, True)[0], "2030-09-22T11:22:12.5Z")
+
+    def test_odd_cells_sort_after_typed_ones_but_before_blanks(self):
+        self.assertEqual(self.order(["x", 5, None, 1], F.NUMBER), [1, 5, "x", None])
+        self.assertEqual(self.order(["?", "2030-01-01", "", "2029-01-01"], F.DATE), ["2029-01-01", "2030-01-01", "?", ""])
+
+    def test_sort_is_stable(self):
+        rows = [{"k": "a", "n": i} for i in range(5)] + [{"k": "A", "n": 9}]
+        got = F.sort_indices(range(6), rows, "k", F.TEXT, False)
+        self.assertEqual(got, [0, 1, 2, 3, 4, 5])
+        got = F.sort_indices(range(6), rows, "k", F.TEXT, True)
+        self.assertEqual(got, [0, 1, 2, 3, 4, 5])      # equal keys keep their order in both directions
+
+
+class FilterConditionTest(unittest.TestCase):
+    def cond(self, ctype, op, a, b=""):
+        return F.make_condition(ctype, op, a, b)
+
+    def test_text_conditions(self):
+        t = lambda op, a, v: self.cond(F.TEXT, op, a).test(v)
+        self.assertTrue(t("contains", "ANA", "Banana"))
+        self.assertFalse(t("contains", "x", "Banana"))
+        self.assertTrue(t("does not contain", "x", "Banana"))
+        self.assertTrue(t("equals", "alice example", "Alice Example"))
+        self.assertFalse(t("equals", "alice", "Alice Example"))
+        self.assertTrue(t("begins with", "ali", "Alice"))
+        self.assertTrue(t("ends with", "CE", "Alice"))
+        self.assertFalse(t("ends with", "ali", "Alice"))
+        self.assertEqual(sorted(F.OPS[F.TEXT]), sorted(["contains", "does not contain", "equals", "begins with",
+                                                        "ends with"]))
+
+    def test_number_conditions(self):
+        t = lambda op, a, v, b="": self.cond(F.NUMBER, op, a, b).test(v)
+        self.assertTrue(t("equals", "1,234", 1234))
+        self.assertTrue(t("does not equal", "5", "6"))
+        self.assertTrue(t("does not equal", "5", "abc"))    # not a number: certainly not 5
+        self.assertTrue(t("greater than", "5", "5.5"))
+        self.assertFalse(t("greater than", "5", "5"))
+        self.assertFalse(t("greater than", "5", "abc"))
+        self.assertTrue(t("less than", "5", "-1"))
+        self.assertTrue(t("between", "1", 1, "3"))
+        self.assertTrue(t("between", "1", "3", "3"))
+        self.assertFalse(t("between", "1", "4", "3"))
+
+    def test_invalid_input_is_an_error_with_a_message(self):
+        for ctype, op, a, b in ((F.NUMBER, "greater than", "abc", ""), (F.NUMBER, "between", "1", ""),
+                                (F.NUMBER, "between", "5", "1"), (F.DATE, "after", "15/09/2030", ""),
+                                (F.DATE, "between", "", ""), (F.DATE, "between", "2030-09-15", "2030-09-01"),
+                                (F.TEXT, "contains", "", ""), (F.TEXT, "bogus", "x", "")):
+            with self.assertRaises(F.FilterError, msg=(ctype, op, a, b)) as cm:
+                self.cond(ctype, op, a, b)
+            self.assertTrue(str(cm.exception))
+
+    def test_date_conditions(self):
+        t = lambda op, a, v, b="": self.cond(F.DATE, op, a, b).test(v)
+        self.assertTrue(t("on", "2030-09-15", "2030-09-15 23:59:59"))
+        self.assertFalse(t("on", "2030-09-15", "2030-09-16 00:00:00"))
+        self.assertTrue(t("before", "2030-09-15", "2030-09-14 23:59:59"))
+        self.assertFalse(t("before", "2030-09-15", "2030-09-15 00:00:00"))
+        self.assertTrue(t("after", "2030-09-15", "2030-09-16 00:00:00"))
+        self.assertFalse(t("after", "2030-09-15", "2030-09-15 23:00:00"))     # after the whole day
+        self.assertTrue(t("after", "2030-09-15 10:00", "2030-09-15 10:01:00"))
+        self.assertTrue(t("between", "2030-09-01", "2030-09-15 23:59:59", "2030-09-15"))   # To is inclusive
+        self.assertTrue(t("between", "2030-09-01", "2030-09-01 00:00:00", "2030-09-15"))
+        self.assertFalse(t("between", "2030-09-01", "2030-09-16 00:00:00", "2030-09-15"))
+        self.assertTrue(t("between", "", "2020-01-01", "2030-09-15"))        # open From
+        self.assertTrue(t("between", "2030-09-01", "2099-01-01", ""))         # open To
+        self.assertIsNone(t("after", "2030-09-15", "not a time"))             # undated: not decided by the condition
+
+    def test_presets_are_relative_to_the_newest_value_not_now(self):
+        vals = ["2020-03-10 12:00:00", "2020-03-09 13:00:00", "2020-03-01 00:00:00", None, "?", "2020-02-01"]
+        self.assertEqual(F.newest(vals).isoformat(" "), "2020-03-10 12:00:00")
+        frm, to = F.preset_range(vals, "Last 24 h of data")
+        self.assertEqual((frm, to), ("2020-03-09 12:00:00", "2020-03-10 12:00:00"))
+        c = self.cond(F.DATE, "between", frm, to)
+        kept = [v for v in vals if c.test(v)]
+        self.assertEqual(kept, ["2020-03-10 12:00:00", "2020-03-09 13:00:00"])
+        self.assertEqual(F.preset_range(vals, "Last 7 days of data")[0], "2020-03-03 12:00:00")
+        self.assertEqual(F.preset_range(vals, "Last 30 days of data")[0], "2020-02-09 12:00:00")
+        self.assertEqual(F.preset_range([None, "x"], "Last 7 days of data"), None)
+        self.assertEqual(list(F.PRESETS), ["Last 24 h of data", "Last 7 days of data", "Last 30 days of data"])
+
+
+class ColumnFilterTest(unittest.TestCase):
+    ROWS = [{"Name": "Alice", "When": "2030-09-01 10:00:00", "N": 1},
+            {"Name": "Bob", "When": "2030-09-10 10:00:00", "N": 2},
+            {"Name": "", "When": None, "N": 3},
+            {"Name": "Banana", "When": "2030-09-20 10:00:00", "N": None},
+            {"Name": None, "When": "garbled", "N": 5}]
+
+    def test_values_and_blanks(self):
+        f = F.ColumnFilter(F.TEXT, values={"Alice", "Banana"})
+        self.assertEqual(F.filter_indices(self.ROWS, [("Name", f)]), [0, 2, 3, 4])   # blanks kept by default
+        f = F.ColumnFilter(F.TEXT, values={"Alice", "Banana"}, blanks=False)
+        self.assertEqual(F.filter_indices(self.ROWS, [("Name", f)]), [0, 3])
+        self.assertFalse(F.ColumnFilter(F.TEXT).active)
+        self.assertTrue(F.ColumnFilter(F.TEXT, blanks=False).active)
+
+    def test_filters_on_several_columns_combine_with_and(self):
+        a = F.ColumnFilter(F.TEXT, cond=F.make_condition(F.TEXT, "contains", "b"), blanks=False)
+        b = F.ColumnFilter(F.NUMBER, cond=F.make_condition(F.NUMBER, "less than", "3"), blanks=False)
+        self.assertEqual(F.filter_indices(self.ROWS, [("Name", a)]), [1, 3])
+        self.assertEqual(F.filter_indices(self.ROWS, [("N", b)]), [0, 1])
+        self.assertEqual(F.filter_indices(self.ROWS, [("Name", a), ("N", b)]), [1])
+
+    def test_date_between_keeps_blank_and_undated_rows_unless_unticked(self):
+        c = F.make_condition(F.DATE, "between", "2030-09-05", "2030-09-15")
+        kept = F.ColumnFilter(F.DATE, cond=c)
+        self.assertEqual(F.filter_indices(self.ROWS, [("When", kept)]), [1, 2, 4])     # Bob + blank + undated
+        dropped = F.ColumnFilter(F.DATE, cond=c, blanks=False)
+        self.assertEqual(F.filter_indices(self.ROWS, [("When", dropped)]), [1])
+        self.assertIn("blanks kept", kept.describe("When"))
+        self.assertIn("between 2030-09-05 and 2030-09-15", kept.describe("When"))
+        self.assertIn("blanks removed", dropped.describe("When"))
+
+    def test_date_value_keys_are_days(self):
+        f = F.ColumnFilter(F.DATE, values={"2030-09-10"})
+        self.assertEqual(F.filter_indices(self.ROWS, [("When", f)]), [1, 2])
+        self.assertEqual(F.value_key("2030-09-10 10:00:00", F.DATE), "2030-09-10")
+        self.assertEqual(F.value_key("garbled", F.DATE), "garbled")
+        self.assertEqual(F.value_key(12, F.NUMBER), "12")
+
+    def test_text_search_over_all_columns(self):
+        self.assertEqual(F.filter_indices(self.ROWS, [], text="ban", cols=["Name", "When"]), [3])
+        self.assertEqual(F.filter_indices(self.ROWS, [], text="2030-09-1", cols=["Name", "When"]), [1])
+
+    def test_distinct_values_and_counts(self):
+        rows = [{"c": v} for v in ("b", "a", "b", None, "", "A")]
+        items, blanks = F.distinct([r["c"] for r in rows], F.TEXT)
+        self.assertEqual(items, [("a", 1), ("A", 1), ("b", 2)])
+        self.assertEqual(blanks, 2)
+        items, blanks = F.distinct(["2030-09-01 10:00:00", "2030-09-01 11:00:00", "2029-01-01", "odd"], F.DATE)
+        self.assertEqual(items, [("2029-01-01", 1), ("2030-09-01", 2), ("odd", 1)])
+
+    def test_describe_all(self):
+        filters = [("Name", F.ColumnFilter(F.TEXT, cond=F.make_condition(F.TEXT, "contains", "ana"), blanks=False)),
+                   ("StartUTC", F.ColumnFilter(F.DATE, cond=F.make_condition(F.DATE, "between", "2030-09-01",
+                                                                            "2030-09-15")))]
+        text = F.describe_all(filters, shown=112, total=686)
+        self.assertEqual(text, "Name contains 'ana' (blanks removed); StartUTC between 2030-09-01 and 2030-09-15 "
+                               "(blanks kept) — 112 of 686 rows")
+        self.assertEqual(F.describe_all([], shown=686, total=686), "No filters — 686 rows")
+        self.assertIn("text search 'x'", F.describe_all([], text="x", shown=1, total=2))
+        values = F.ColumnFilter(F.TEXT, values={"Bob", "Alice"})
+        self.assertEqual(values.describe("Name"), "Name is one of 'Alice', 'Bob'")
+        many = F.ColumnFilter(F.TEXT, values={str(i) for i in range(20)})
+        self.assertEqual(many.describe("Name"), "Name is one of 20 ticked values")
+
+
+class InvisibleCharTest(unittest.TestCase):
+    def test_invisible_and_control_characters_are_shown(self):
+        self.assertEqual(F.visible("‎"), "⟨U+200E⟩")
+        self.assertEqual(F.visible("a​b"), "a⟨U+200B⟩b")
+        for cp in list(range(0x200B, 0x2010)) + list(range(0x202A, 0x202F)) + list(range(0x2060, 0x2065)) + \
+                [0xFEFF, 0x00, 0x07, 0x1F, 0x7F, 0x80, 0x9F, 0x00AD, 0x115F, 0x3164]:
+            ch = chr(cp)
+            self.assertEqual(F.visible(ch), f"⟨U+{cp:04X}⟩", hex(cp))
+        self.assertEqual(F.visible("plain text, café नमस्ते"),
+                         "plain text, café नमस्ते")   # real letters untouched
+        self.assertEqual(F.visible("a\nb\tc"), "a⟨U+000A⟩b⟨U+0009⟩c")
+        self.assertEqual(F.visible("a\nb\tc", keep_breaks=True), "a\nb\tc")
+        self.assertEqual(F.visible(""), "")
+
+    def test_cell_text(self):
+        self.assertEqual(F.cell_text(None), "")
+        self.assertEqual(F.cell_text(5), "5")
+        self.assertEqual(F.cell_text(b"\x00\x01"), "<2 bytes>")
+
+
+class ChecklistTest(unittest.TestCase):
+    def test_select_all_search_and_result(self):
+        cl = F.Checklist([("Alice", 2), ("Bob", 1), ("Carol", 3)], blanks=2)
+        self.assertEqual(cl.result(), (None, True))           # nothing changed: no filter
+        cl.set("Bob", False)
+        self.assertEqual(cl.result(), (frozenset({"Alice", "Carol"}), True))
+        self.assertEqual(cl.all_state(), "partial")
+        cl.set_all(True)
+        self.assertEqual(cl.all_state(), "on")
+        cl.search("AR")                                        # only Carol matches: OK keeps only what is ticked of it
+        self.assertEqual(cl.shown()[0], ["Carol"])
+        self.assertEqual(cl.result(), (frozenset({"Carol"}), True))
+        cl.search("")
+        cl.blanks = False
+        self.assertEqual(cl.result(), (None, False))
+        cl.set_all(False)
+        self.assertEqual(cl.result(), (frozenset(), False))
+
+    def test_shown_list_is_capped_but_search_covers_all(self):
+        items = [(f"v{i:05d}", 1) for i in range(F.SHOWN_CAP + 50)]
+        cl = F.Checklist(items, blanks=0)
+        keys, capped, total = cl.shown()
+        self.assertEqual(len(keys), F.SHOWN_CAP)
+        self.assertTrue(capped)
+        self.assertEqual(total, F.SHOWN_CAP + 50)
+        cl.search("v10049")
+        self.assertEqual(cl.shown(), (["v10049"], False, 1))
+        self.assertEqual(cl.result(), (frozenset({"v10049"}), True))
+
+    def test_date_tree_groups_year_month_day_with_tri_state(self):
+        cl = F.Checklist([("2029-12-31", 1), ("2030-09-01", 2), ("2030-09-02", 1), ("2030-10-01", 1), ("odd", 1)],
+                         blanks=0)
+        tree = F.group_days(cl.shown()[0])
+        self.assertEqual(tree["years"], [("2029", [("2029-12", ["2029-12-31"])]),
+                                         ("2030", [("2030-09", ["2030-09-01", "2030-09-02"]),
+                                                   ("2030-10", ["2030-10-01"])])])
+        self.assertEqual(tree["other"], ["odd"])
+        cl.set("2030-09-01", False)
+        self.assertEqual(cl.group_state(["2030-09-01", "2030-09-02"]), "partial")
+        self.assertEqual(cl.group_state(["2030-10-01"]), "on")
+        cl.set("2030-09-02", False)
+        self.assertEqual(cl.group_state(["2030-09-01", "2030-09-02"]), "off")
+        self.assertEqual(F.month_label("2030-09"), "September")
+
+
+class PipelineTest(unittest.TestCase):
+    def test_shown_indices_filters_then_sorts_and_keeps_the_sort(self):
+        rows = [{"Name": n, "N": i} for i, n in enumerate(["d", "b", "a", "c", None])]
+        f = {"Name": F.ColumnFilter(F.TEXT, values={"a", "b", "c"})}
+        got = F.shown_indices(rows, ["Name", "N"], {"Name": F.TEXT, "N": F.NUMBER}, f, sort=("Name", True))
+        self.assertEqual([rows[i]["Name"] for i in got], ["c", "b", "a", None])
+        got = F.shown_indices(rows, ["Name", "N"], {"Name": F.TEXT, "N": F.NUMBER}, f, sort=("Name", True), text="b")
+        self.assertEqual(got, [1])
+        rng = ("N", F.ColumnFilter(F.NUMBER, cond=F.make_condition(F.NUMBER, "less than", "3")))
+        got = F.shown_indices(rows, ["Name", "N"], {"Name": F.TEXT, "N": F.NUMBER}, {}, extra=[rng])
+        self.assertEqual(got, [0, 1, 2])
 
 
 if __name__ == "__main__":
