@@ -376,6 +376,8 @@ See [docs/TESTING.md](docs/TESTING.md) for how the maps were tested.
 
 Capability Access Manager (camera, microphone and location usage) maps are a separate tool: [sqlecmd-maps-capabilityaccessmanager](https://github.com/KotlaAvinash/sqlecmd-maps-capabilityaccessmanager).
 
+Changes are listed in [CHANGELOG.md](CHANGELOG.md). To contribute, read [CONTRIBUTING.md](CONTRIBUTING.md) (synthetic data only); to report a vulnerability, see [SECURITY.md](SECURITY.md).
+
 ## Credits
 
 - `Windows_YourPhone_PhotosDB.smap` builds on **Andrew Rathbun**'s original map in SQLECmd.

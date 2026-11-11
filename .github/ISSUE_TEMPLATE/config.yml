@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/KotlaAvinash/phone-link-forensics/security/advisories/new
+    about: Do not open a public issue for a vulnerability. Never send real evidence or personal data, even privately.
