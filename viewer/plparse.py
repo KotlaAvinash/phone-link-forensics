@@ -173,7 +173,8 @@ def find_fulltrust(root):
     return None
 
 
-GUID_RE = re.compile(r"^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$")
+_GUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+GUID_RE = re.compile(r"^(?:\{%s\}|%s)$" % (_GUID, _GUID))      # bare, or in a pair of braces
 
 
 def is_guid(v):
@@ -181,7 +182,17 @@ def is_guid(v):
 
 
 def norm_guid(v):
-    return str(v or "").strip().strip("{}").lower()
+    """THE normaliser for device ids / GUIDs in this engine: surrounding space and one pair of braces dropped,
+    lower case. Every comparison of a device id or GUID goes through same_guid (or this)."""
+    t = str(v or "").strip()
+    if len(t) >= 2 and t[0] == "{" and t[-1] == "}":
+        t = t[1:-1].strip()
+    return t.lower()
+
+
+def same_guid(a, b):
+    """True when a and b are both GUIDs (bare or braced) and the same one, case ignored."""
+    return is_guid(a) and is_guid(b) and norm_guid(a) == norm_guid(b)
 
 
 def owns_ft_row(device_id, label):
@@ -190,7 +201,7 @@ def owns_ft_row(device_id, label):
     is a GUID and the row's device_id is the same GUID (case and braces ignored). A blank,
     unknown or other device_id, or a label that is not a GUID, never matches.
     """
-    return is_guid(label) and norm_guid(device_id) == norm_guid(label)
+    return same_guid(device_id, label)
 
 
 def _inside(path, folder):
@@ -289,7 +300,7 @@ def device_metadata(label, entries, error, meta_src, locate_note=""):
     Split the package-wide metadata into this device's entry/entries (Metadata.Id equal to
     the folder GUID) and everyone else's. Returns (this_device, package_other_entries).
     """
-    mine = [e for e in entries if is_guid(label) and norm_guid(e.get("id")) == norm_guid(label)]
+    mine = [e for e in entries if same_guid(e.get("id"), label)]
     others = [e for e in entries if e not in mine]
     if not meta_src:
         note = "%s was not found; no device metadata available." % META_FILE
@@ -839,7 +850,7 @@ def parse_all(dbs, ft_db, idx, digits, device_label=None):
     if device_label and ft_rows and not hosted:
         d["_ft_scope_warning"] = ("hosted_app_ids holds %d row(s) for device_id(s) %s but none "
                                   "for this device (%s). Streamed-app correlation is empty - "
-                                  "check the folder name matches the device_id exactly."
+                                  "check the folder name is the device_id (case and braces ignored)."
                                   % (len(ft_rows), ", ".join(x or "(blank)" for x in ft_devices),
                                      device_label))
     appname = {a["package"]: a["app_name"] for a in apps if a["app_name"]}

@@ -1405,6 +1405,44 @@ class MetadataLocation(unittest.TestCase):
         self.assertIsNone(P.find_metadata(dev))
 
 
+class GuidNormaliser(unittest.TestCase):
+    """One normaliser (case + braces) for every engine comparison of device ids and GUIDs."""
+
+    def test_same_guid(self):
+        g = GUID_A
+        self.assertTrue(P.same_guid("{%s}" % g.upper(), g))
+        self.assertTrue(P.same_guid(" %s " % g.upper(), "{%s}" % g))
+        self.assertFalse(P.same_guid("", ""))
+        self.assertFalse(P.same_guid("not-a-guid", "not-a-guid"))
+        self.assertFalse(P.same_guid(GUID_A, GUID_B))
+        self.assertEqual(P.norm_guid("{%s}" % g.upper()), g.lower())
+
+    def test_unbalanced_braces_are_not_a_guid(self):
+        self.assertTrue(P.is_guid("{%s}" % GUID_A))
+        self.assertFalse(P.is_guid("{%s" % GUID_A))
+        self.assertFalse(P.is_guid("%s}" % GUID_A))
+        self.assertFalse(P.owns_ft_row("{%s" % GUID_A, GUID_A))
+
+    def test_braced_upper_case_ids_match_the_folder_everywhere(self):
+        braced = "{%s}" % GUID_A.upper()
+        self.assertTrue(P.owns_ft_row(braced, GUID_A))
+        mine, others = P.device_metadata(GUID_A, [{"id": braced}, {"id": GUID_B}], "", "x.json")
+        self.assertEqual([e["id"] for e in mine["entries"]], [braced])
+        self.assertEqual([e["id"] for e in others], [GUID_B])
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        pkg = make_package(os.path.join(tmp, "in"), live=[("com.braced.on.a", "1,1,2,2", braced)], deleted=[])
+        out = os.path.join(tmp, "out")
+        run_main(["--input", pkg, "--out", out])
+        a_apps = read_csv_rows(os.path.join(out, GUID_A, "apps.csv"))
+        self.assertEqual([r["package"] for r in a_apps if r["streamed_to_pc"] == "yes"], ["com.braced.on.a"])
+        self.assertFalse([r for r in read_csv_rows(os.path.join(out, GUID_B, "apps.csv")) if r["streamed_to_pc"]])
+        live = read_csv_rows(os.path.join(out, "_package", "fulltrust_hosted_app_ids.csv"))
+        self.assertEqual([r["attributed_to_device_folder"] for r in live], [GUID_A])
+        w = read_acq(out, GUID_B)["warnings"]
+        self.assertTrue([x for x in w if "case and braces ignored" in x], w)
+
+
 class Recoverability(unittest.TestCase):
     """secure_delete is a setting of the analysing connection, not of the file. Judge by the file's bytes."""
 
