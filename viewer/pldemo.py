@@ -332,7 +332,23 @@ def build(folder):
 PAIRING_GUIDS = ["e1e1e1e1-e1e1-4e1e-ae1e-e1e1e1e1e1e1",   # oldest, folder only
                  "e2e2e2e2-e2e2-4e2e-ae2e-e2e2e2e2e2e2",   # databases left but empty
                  "e3e3e3e3-e3e3-4e3e-ae3e-e3e3e3e3e3e3"]   # the current phone, full demo data
-DEMO_PHONE_ID = "demo-metadata-id-0001"
+# As on a real package, a phone's Metadata.Id is its pairing folder's GUID (Phone Link removes the entry when the
+# phone is unlinked, so the oldest pairing has none). Two more synthetic entries exercise the other paths: a
+# Windows PC whose Id names no folder, and an older phone entry whose Id is not a GUID at all - only the time
+# fallback can place it (its registration is just before the second pairing folder appears).
+DEMO_PHONE_ID = PAIRING_GUIDS[2]
+DEMO_PC_HW, DEMO_PC_ID, DEMO_PC_NAME = "00000000EXAMPLEPC", "demo-pc-metadata-0001", "EXAMPLE-PC"
+DEMO_OLD_PHONE_HW, DEMO_OLD_PHONE_ID, DEMO_OLD_PHONE_NAME = "00000000EXAMPLE3", "demo-old-metadata-0001", "Example Old Phone"
+
+
+def _entry(mid, iso, name, os_name, os_version, client, make, model, linked=True):
+    return {"Certificates": {"SelfSigned": ["example-cert"]}, "IsLinked": linked, "Metadata": {
+        "Id": mid, "DistinguishedDeviceId": "demo-distinguished-" + mid[-4:], "RegitrationTime": iso,
+        "LastSeenTime": iso, "Metadata": {
+            "ClientType": client, "ClientVersion": "1.0.example", "DisplayName": name,
+            "OsName": os_name, "OsVersion": os_version, "Capabilities": ["Messaging", "Photos"],
+            "Manufacture": make, "ModelName": model, "ModelVersion": "1", "ConsentVersion": 1,
+            "IsEnabled": True, "CustomData": ""}}}
 
 
 def build_package(root):
@@ -341,15 +357,16 @@ def build_package(root):
     lc = os.path.join(root, "Microsoft.YourPhone_8wekyb3d8bbwe", "LocalCache")
     idx = os.path.join(lc, "Indexed")
     os.makedirs(os.path.join(idx, PAIRING_GUIDS[0]), exist_ok=True)
+    time.sleep(1.2)               # the oldest pairing exists before the old phone entry registers (whole seconds)
+    old_reg = datetime.now(timezone.utc).replace(tzinfo=None)     # naive UTC, as the rest of this file uses
     empty = os.path.join(idx, PAIRING_GUIDS[1], "System", "Database")
-    os.makedirs(empty, exist_ok=True)
+    os.makedirs(empty, exist_ok=True)                         # ... and the second pairing folder appears just after
     con = sqlite3.connect(os.path.join(empty, "settings.db"))
     for s in DDL["settings.db"]:
         con.execute(s)
     con.commit()
     con.close()
-    time.sleep(1.2)                                           # the older pairings exist before this phone registers
-    reg = datetime.now(timezone.utc).replace(tzinfo=None)     # naive UTC, as the rest of this file uses
+    reg = datetime.now(timezone.utc).replace(tzinfo=None)
     time.sleep(0.3)
     build(os.path.join(idx, PAIRING_GUIDS[2], "System", "Database"))   # current pairing folder appears just after
     ft = os.path.join(idx, "FullTrust")
@@ -365,13 +382,11 @@ def build_package(root):
     iso = reg.strftime("%Y-%m-%dT%H:%M:%S+00:00")
     meta = {"ConfigVersion": 1, "DeviceMetadatas": {
         "00000000EXAMPLE1": [],                                  # a phone whose details were removed
-        "00000000EXAMPLE2": [{"Certificates": {"SelfSigned": ["example-cert"]}, "IsLinked": True, "Metadata": {
-            "Id": DEMO_PHONE_ID, "DistinguishedDeviceId": "demo-distinguished-0001", "RegitrationTime": iso,
-            "LastSeenTime": iso, "Metadata": {
-                "ClientType": "Android", "ClientVersion": "1.0.example", "DisplayName": "Example Phone",
-                "OsName": "Android", "OsVersion": "99", "Capabilities": ["Messaging", "Photos"],
-                "Manufacture": "ExampleCorp", "ModelName": "EX-1", "ModelVersion": "1", "ConsentVersion": 1,
-                "IsEnabled": True, "CustomData": ""}}}]}}
+        "00000000EXAMPLE2": [_entry(DEMO_PHONE_ID, iso, "Example Phone", "Android", "99", "Android", "ExampleCorp",
+                                    "EX-1")],
+        DEMO_OLD_PHONE_HW: [_entry(DEMO_OLD_PHONE_ID, old_reg.strftime("%Y-%m-%dT%H:%M:%S+00:00"), DEMO_OLD_PHONE_NAME,
+                                   "Android", "98", "Android", "ExampleCorp", "EX-0", linked=False)],
+        DEMO_PC_HW: [_entry(DEMO_PC_ID, iso, DEMO_PC_NAME, "Windows", "10.0.1", "Windows", "ExampleCorp", "EX-PC")]}}
     with open(os.path.join(lc, "DeviceMetadataStorage.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f)
     trust = {"ConfigVersion": 1, "TrustedClients": {DEMO_PHONE_ID: {

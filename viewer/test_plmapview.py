@@ -653,7 +653,11 @@ class OpenFolderSourcesTest(unittest.TestCase):
         return err
 
     def phones(self, app):
-        return {r.get("DisplayName") for r in app.g.views["PC_phones"].rows if r.get("DisplayName")}
+        # every demo package also lists the same Windows PC and older phone entry; they cannot tell cases apart
+        same_in_every_case = {pldemo.DEMO_PC_NAME, pldemo.DEMO_OLD_PHONE_NAME}
+        names = {r.get("DisplayName") for r in app.g.views["PC_phones"].rows if r.get("DisplayName")}
+        self.assertTrue(same_in_every_case <= names, names)
+        return names - same_in_every_case
 
     def test_opening_a_second_package_shows_its_own_linked_phones(self):
         root_a, lc_a = self.package("case-a", "CASE A PHONE")

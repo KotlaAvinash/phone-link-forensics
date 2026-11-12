@@ -382,11 +382,14 @@ class CopyTimeEvidence(unittest.TestCase):
         self.assertFalse([e for e in events if "linked" in e or "folder created" in e], events)
         self.assertTrue(any("registered" in e for e in events), events)   # metadata times are still history
 
-    def test_no_time_matches(self):
-        self.assertEqual(self.g.views["PR3"].rows, [])
-        for r in self.g.views["PC_phones"].rows:
-            if "_e" in r:
-                self.assertEqual([t for rid, t, _ in self.g.links(r["_e"]) if rid == "PR3"], [])
+    def test_no_time_matches_but_the_stored_link_holds(self):
+        rows = self.g.views["PR3"].rows
+        self.assertEqual([r["Basis"] for r in rows], ["stored: Metadata.Id = pairing folder GUID"])
+        self.assertEqual(rows[0]["GapSeconds"], "")
+        links = {r["MetadataID"]: [t for rid, t, _ in self.g.links(r["_e"]) if rid == "PR3"]
+                 for r in self.g.views["PC_phones"].rows if r.get("MetadataID")}
+        self.assertEqual(links.pop(pldemo.DEMO_PHONE_ID), [("pairing", pldemo.PAIRING_GUIDS[2])])
+        self.assertEqual(set(map(tuple, links.values())), {()})       # nothing matched by time
 
     def test_numbering_does_not_claim_pairing_order(self):
         rows = self.g.views["PC_devices"].rows
@@ -869,6 +872,24 @@ class LinkedPhones(unittest.TestCase):
         self.assertEqual(p["Certificates"], 1)
         self.assertNotIn("example-cert", str(p))  # certificate bodies are never shown
         self.assertTrue(p["RegisteredUTC"])
+        # as on a real package: the phone's Metadata.Id is its pairing folder's GUID
+        self.assertEqual(p["MetadataID"], pldemo.PAIRING_GUIDS[2])
+        self.assertEqual(pldemo.DEMO_PHONE_ID, pldemo.PAIRING_GUIDS[2])
+        pc = phones[pldemo.DEMO_PC_HW]
+        self.assertIn("Windows PC", pc["Kind"])
+        self.assertNotIn(D.norm_id(pc["MetadataID"]), [D.norm_id(x) for x in pldemo.PAIRING_GUIDS])
+        old = phones[pldemo.DEMO_OLD_PHONE_HW]
+        self.assertEqual(old["Kind"], "phone")
+        self.assertFalse(D.GUID.match(old["MetadataID"]), old)     # not a GUID: only the time fallback can place it
+
+    def test_engine_credits_the_demo_phone_to_its_own_folder(self):
+        entries, err = D.plparse.read_metadata(os.path.join(self.lc, D.META), [])
+        self.assertEqual(err, "")
+        mine, _ = D.plparse.device_metadata(pldemo.PAIRING_GUIDS[2], entries, err, "x")
+        self.assertEqual([e["model"] for e in mine["entries"]], ["EX-1"])
+        self.assertNotIn("no metadata entry matches", mine["note"])
+        for guid in pldemo.PAIRING_GUIDS[:2]:      # the older pairings' entries were removed (or name no folder)
+            self.assertEqual(D.plparse.device_metadata(guid, entries, err, "x")[0]["entries"], [])
 
     def test_trust_and_stored_links(self):
         t = self.rows("PC_trust")[0]
@@ -878,12 +899,21 @@ class LinkedPhones(unittest.TestCase):
         pairing = ("pairing", pldemo.PAIRING_GUIDS[2])
         self.assertEqual(len([x for rid, x, _ in self.g.links(pairing) if rid == "PR2"]), 2)
 
-    def test_inferred_by_time_to_closest_folder_only(self):
-        rel = self.rows("PR3")
-        self.assertEqual(len(rel), 1)
-        self.assertIn(pldemo.PAIRING_GUIDS[2][:8], rel[0]["Pairing"])
-        self.assertIn("inferred", rel[0]["Basis"])
-        self.assertLessEqual(rel[0]["GapSeconds"], D.INFER_WINDOW_S)
+    def test_stored_link_for_the_phone_and_time_fallback_for_the_entry_without_a_folder_id(self):
+        links = {a[1]: b[1] for a in list(self.g.label) if a[0] == "phone"
+                 for rid, b, _ in self.g.links(a) if rid == "PR3"}
+        self.assertEqual(links, {pldemo.DEMO_PHONE_ID: pldemo.PAIRING_GUIDS[2],
+                                 pldemo.DEMO_OLD_PHONE_ID: pldemo.PAIRING_GUIDS[1]})
+        rel = {r["Phone"]: r for r in self.rows("PR3")}
+        self.assertEqual(len(rel), 2, rel)
+        stored = rel["phone Example Phone"]
+        self.assertIn(pldemo.PAIRING_GUIDS[2][:8], stored["Pairing"])
+        self.assertEqual(stored["Basis"], "stored: Metadata.Id = pairing folder GUID")
+        fallback = rel["phone " + pldemo.DEMO_OLD_PHONE_NAME]
+        self.assertIn(pldemo.PAIRING_GUIDS[1][:8], fallback["Pairing"])
+        self.assertTrue(fallback["Basis"].startswith("inferred by time (fallback"), fallback)
+        self.assertLessEqual(fallback["GapSeconds"], D.INFER_WINDOW_S)
+        self.assertFalse([r for r in rel.values() if "Windows" in r["Phone"]])   # the PC is never matched
 
     def test_history_in_time_order(self):
         t = [r["TimeUTC"] for r in self.rows("PR4")]
