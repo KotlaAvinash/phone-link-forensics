@@ -410,6 +410,7 @@ class Viewer(tk.Tk):
         self._layout_filters()
         self.apply_theme(self.theme_mode)
         self.bind("<Map>", lambda e: self._apply_title_bar() if e.widget is self else None, add="+")
+        self.bind("<Configure>", lambda e: self._window_resized() if e.widget is self else None, add="+")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.load_device(0, initial)
 
@@ -1286,6 +1287,14 @@ class Viewer(tk.Tk):
         self.panel = FilterPanel(self, self.cur_vid, col)
         return self.panel
 
+    def _window_resized(self):
+        """An open filter panel is placed (and its value list sized) again, so it stays inside the window."""
+        if self.panel is not None:
+            try:
+                self.panel._place()
+            except tk.TclError:
+                pass
+
     def close_panel(self):
         p, self.panel = self.panel, None
         if p is not None:
@@ -1695,6 +1704,7 @@ class Viewer(tk.Tk):
 
 
 GLYPH = {"on": CHECKED, "off": UNCHECKED, "partial": PARTIAL}
+LIST_ROWS, LIST_MIN_ROWS = 11, 3     # the filter panel's value list: rows when there is room, rows at least
 
 
 class FilterPanel(tk.Frame):
@@ -1785,7 +1795,7 @@ class FilterPanel(tk.Frame):
         self.search_entry.pack(fill="x", padx=10, pady=(0, 4))
         lst = tk.Frame(self)
         lst.pack(fill="both", expand=True, padx=10)
-        self.list = ttk.Treeview(lst, show="tree", selectmode="browse", height=11)
+        self.list = ttk.Treeview(lst, show="tree", selectmode="browse", height=LIST_ROWS)
         self.list.column("#0", width=app.px(320), stretch=True)
         ys = ttk.Scrollbar(lst, orient="vertical", command=self.list.yview)
         self.list.configure(yscrollcommand=ys.set)
@@ -1844,11 +1854,24 @@ class FilterPanel(tk.Frame):
         x -= t.xview()[0] * sum(widths)
         x += t.winfo_rootx() - app.winfo_rootx()
         y = t.winfo_rooty() - app.winfo_rooty() + app.px(24)
+        self._fit_height(app.winfo_height() - 8)
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
         x = max(4, min(int(x), app.winfo_width() - w - 4))
         y = max(4, min(int(y), app.winfo_height() - h - 4))
         self.place(in_=app, x=x, y=y)
         self.lift()
+
+    def _fit_height(self, room):
+        """The value list as tall as the window allows (LIST_ROWS at most, LIST_MIN_ROWS at least), so that OK and
+        Cancel are always inside the window."""
+        if room <= 0:          # a window that is not shown yet has no height to fit
+            return
+        rows = int(self.list.cget("height"))
+        rowh = max(1, self.app.px(18), int(ttk.Style(self.app).lookup("Treeview", "rowheight") or 0))
+        want = max(LIST_MIN_ROWS, min(LIST_ROWS, rows + (room - self.winfo_reqheight()) // rowh))
+        if want != rows:
+            self.list.configure(height=want)
+            self.app.update_idletasks()
 
     def fill_list(self):
         cl, lst = self.checklist, self.list

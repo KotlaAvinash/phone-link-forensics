@@ -2243,6 +2243,27 @@ class ViewerReview3Test(unittest.TestCase):
             self.assertLessEqual(app.status.winfo_y() + app.status.winfo_height(), app.winfo_height(), (w, h))
             app.on_close(warn=False)
 
+    # ---- 3 the filter panel's OK and Cancel inside the window
+    def test_filter_panel_buttons_stay_inside_the_window(self):
+        for w, h in ((1366, 740), (1280, 680), (1600, 950)):
+            app = self.sized(w, h)
+            app.show("E_calls")
+            for col in ("StartUTC", "Type"):        # a date panel (the tallest) and a text panel
+                p = app.open_filter(col)
+                app.update()
+                top = p.winfo_rooty() - app.winfo_rooty()
+                self.assertGreaterEqual(top, 0, (w, h, col))
+                for b in (p.ok_btn, p.cancel_btn):
+                    bottom = b.winfo_rooty() - app.winfo_rooty() + b.winfo_height()
+                    self.assertTrue(b.winfo_ismapped(), (w, h, col))
+                    self.assertLessEqual(bottom, app.winfo_height(), (w, h, col))
+                self.assertGreaterEqual(int(p.list.cget("height")), 3)      # the value list is still usable
+            app.geometry(f"{w}x{h - 120}")                                  # a resize with the panel open
+            app.update()
+            bottom = p.ok_btn.winfo_rooty() - app.winfo_rooty() + p.ok_btn.winfo_height()
+            self.assertLessEqual(bottom, app.winfo_height(), (w, h - 120))
+            app.on_close(warn=False)
+
 
 if __name__ == "__main__":
     unittest.main()
