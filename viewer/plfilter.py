@@ -83,17 +83,21 @@ _TIME = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:
 
 
 def parse_number(v):
-    """A number from a cell: ints, floats, and text such as '1,234', '-5', '3.14'. None when it is not one."""
+    """A number from a cell: ints, floats, and text such as '1,234', '-5', '3.14'. None when it is not one.
+    Whole numbers stay int, so large ones (FILETIMEs, 64-bit ids) keep every digit: a float holds only 15-17."""
     if isinstance(v, bool):
         return None
-    if isinstance(v, (int, float)):
-        return float(v) if v == v and v not in (float("inf"), float("-inf")) else None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return v if v == v and v not in (float("inf"), float("-inf")) else None
     if not isinstance(v, str):
         return None
     s = v.strip()
     if not _NUM.fullmatch(s):
         return None
-    return float(s.replace(",", ""))
+    s = s.replace(",", "")
+    return int(s) if "." not in s else float(s)
 
 
 def _time_parts(v):

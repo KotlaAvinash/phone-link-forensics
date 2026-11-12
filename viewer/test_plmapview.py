@@ -2498,6 +2498,22 @@ class ViewerReview3Test(unittest.TestCase):
         key(p.ok_btn, "<Escape>")
         self.assertIsNone(app.panel)
 
+    # ---- 12 large integers keep every digit
+    def test_large_integers_are_compared_exactly(self):
+        cells = [9007199254740993, 9007199254740992, "9007199254740993", "9,007,199,254,740,992"]
+        cf = F.ColumnFilter(F.NUMBER, cond=F.make_condition(F.NUMBER, "equals", "9007199254740993"))
+        self.assertEqual([c for c in cells if cf.match(c)], [9007199254740993, "9007199254740993"])
+        self.assertNotEqual(F.parse_number(133000000000000001), F.parse_number(133000000000000002))   # FILETIMEs
+        self.assertIsInstance(F.parse_number("12"), int)
+        self.assertIsInstance(F.parse_number("1.5"), float)
+        rows = [{"c": c} for c in (133000000000000002, "133000000000000001", 5.5)]
+        self.assertEqual([rows[i]["c"] for i in F.sort_indices(range(3), rows, "c", F.NUMBER)],
+                         [5.5, "133000000000000001", 133000000000000002])
+        between = F.make_condition(F.NUMBER, "between", "9007199254740993", "9007199254740993")
+        self.assertFalse(between.test(9007199254740992))
+        with self.assertRaises(F.FilterError):
+            F.make_condition(F.NUMBER, "between", "9007199254740993", "9007199254740992")
+
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
         app = self.app
