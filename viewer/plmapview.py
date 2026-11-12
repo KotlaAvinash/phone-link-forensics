@@ -216,7 +216,7 @@ NEARBY_MIN, NEARBY_MAX = 1, 1440     # the Nearby box, in minutes
 DEMO_PATH = "(synthetic demo folder)"
 WARN_COLOUR, STATUS_COLOUR = "#ffb74d", "#9fb3c8"
 # ---------------------------------------------------------------- sorting and filtering (logic in plfilter)
-DROP_MARK, FILTER_MARK, SORT_UP, SORT_DOWN = "▾", "⧩", "▲", "▼"   # heading marks: text, so they
+DROP_MARK, FILTER_MARK, SORT_UP, SORT_DOWN = "▾", " ●", "▲", "▼"  # heading marks: text, so they
 CHECKED, UNCHECKED, PARTIAL = "☑", "☐", "▣"                             # follow the theme's colours
 ERR_COLOUR = KIND["check"][1]
 FILTER_DELAY_MS = 250      # the text filter waits this long after the last keystroke before it refills the table
@@ -904,7 +904,8 @@ class Viewer(tk.Tk):
         self.filter_lbl = tk.Label(self.table.master.master, text="", bg=BG, fg=INK, anchor="w", justify="left",
                                    wraplength=self.basis_wrap, font=("Segoe UI", 9))
         self.filter_lbl.pack(fill="x", padx=12, pady=(0, 4), before=self.table.master)
-        self.nav.column("rows", width=130)     # room for "112 of 686" and "2 issues / 28"
+        self.nav.column("#0", width=230)       # the names stretch into what is left ...
+        self.nav.column("rows", width=130)     # ... after room for "112 of 686" and "2 issues / 28"
         # keyboard
         self.filter_entry.bind("<Key>", self._key_typed)
         self.bind("<Control-f>", lambda e: self._focus_filter())
@@ -992,7 +993,7 @@ class Viewer(tk.Tk):
                 self.nav.set(vid, "rows", self._nav_count(v))
 
     def heading_text(self, col, vid=None):
-        """'Name ▾', 'StartUTC ▼ ▾⧩' (sorted newest first, filtered)."""
+        """'Name ▾', 'StartUTC ▼ ▾ ●' (sorted newest first, filtered)."""
         vid = vid or self.cur_vid
         st = self.view_state(vid)
         text = col
