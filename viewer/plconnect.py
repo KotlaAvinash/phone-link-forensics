@@ -286,24 +286,25 @@ def parse_events_xml(xml_text, problems=None):
 
 # Windows names this module matches: the USB root hub id prefix and the HID USB driver
 ROOT_HUB_PREFIX, HID_USB_SERVICE = "USB\\ROOT_HUB", "HidUsb"
-CONNECTED_ENUMERATORS = {"USB": "USB", "USBSTOR": "USB storage", "SWD\\WPDBUSENUM": "portable device (SWD-WPD)",
-                         "BTHENUM": "Bluetooth", "BTHLE": "Bluetooth LE", "BTHLEDEVICE": "Bluetooth LE service"}
+USB_ENUMERATED = "USB-enumerated (external or built in)"
+# What the enumerator of a kept device id (DEVICE_PREFIXES) tells, and no more: a USB id can be a phone or a device
+# built into the PC (a Bluetooth adapter, webcam, card reader) - the id alone cannot tell which. Checked in order.
+INSTALL_CATEGORIES = ((ROOT_HUB_PREFIX, "USB root hub (internal)"), ("USBSTOR\\", "USB storage"),
+                      ("USB\\", USB_ENUMERATED), ("SWD\\WPDBUSENUM", "portable device (SWD-WPD)"),
+                      ("BTHENUM\\", "Bluetooth"), ("BTHLEDEVICE\\", "Bluetooth LE service"), ("BTHLE\\", "Bluetooth LE"))
 
 
 def install_category(devid, service=""):
-    """'connected device: ...' for ids of devices plugged in or paired (USB, USB storage, portable devices,
-    Bluetooth), 'internal/other: ...' for the PC's own hardware and software devices (PCI, HID, ROOT, ACPI, ...).
-    A USB root hub is part of the PC. `service` is the USB driver, when its Enum\\USB key was read."""
+    """The category of a device id the C_install view keeps (its enumerator is one of DEVICE_PREFIXES), or None for
+    any other id (PCI, ACPI, HID, ROOT, ...: the PC's own hardware and software devices, not listed there).
+    `service` is the USB driver, when its Enum\\USB key was read: a USB device using the HID driver is flagged."""
     u = str(devid or "").upper()
-    if u.startswith(ROOT_HUB_PREFIX):
-        return "internal/other: USB root hub (part of the PC)"
-    for prefix in sorted(CONNECTED_ENUMERATORS, key=len, reverse=True):
-        if u.startswith(prefix + "\\"):
-            what = CONNECTED_ENUMERATORS[prefix]
-            if prefix == "USB" and str(service or "").lower() == HID_USB_SERVICE.lower():
-                what += " - input device (HID), may be built in"
-            return f"connected device: {what}"
-    return f"internal/other: {u.split(chr(92), 1)[0] or '?'}"
+    if not u.startswith(DEVICE_PREFIXES):
+        return None
+    what = next(name for prefix, name in INSTALL_CATEGORIES if u.startswith(prefix))
+    if what == USB_ENUMERATED and str(service or "").lower() == HID_USB_SERVICE.lower():
+        what += " - input device (HID)"
+    return what
 
 
 def parse_setupapi(text):
@@ -647,9 +648,12 @@ def build(src, g, View):
     rows.sort(key=lambda r: r["FirstInstallLocal"])
     add("C_install", "First driver install (setupapi.dev.log)",
         SETUPAPI + " and the archived setupapi.dev.<date>.log copies beside it - the first time Windows installed a "
-        "driver for each USB, USB storage, portable (SWD-WPD) or Bluetooth device id (earliest across all logs); "
-        "local time as logged; UTC converted with this PC's time-zone rules (the offset in force on that date). "
-        "Category tells devices that were connected from the PC's own hardware (USB root hubs, and any PCI / HID / ROOT / ACPI id): every row is kept",
+        "driver for each device id (earliest across all logs); local time as logged; UTC converted with this PC's "
+        "time-zone rules (the offset in force on that date). Kept: ids whose enumerator is "
+        + ", ".join(p.rstrip("\\") for p in DEVICE_PREFIXES) + " - the ones a phone can appear under. PCI, ACPI, "
+        "HID, ROOT and other ids are the PC's own hardware and software devices and are not listed. Category is "
+        "what the enumerator tells: a USB-enumerated id may be a plugged-in device or one built in (a Bluetooth "
+        "adapter, webcam, card reader) - the id alone cannot tell; a USB root hub is part of the PC",
         ["FirstInstallLocal", "FirstInstallUTC", "Category", "DeviceID", "Section", "Log", "MatchedDevice"], rows)
 
     # events

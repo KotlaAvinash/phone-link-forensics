@@ -353,29 +353,45 @@ class PhysicalDevice(unittest.TestCase):
 
 
 class InstallCategory(unittest.TestCase):
-    def test_categories(self):
+    def test_categories_say_only_what_the_id_tells(self):
         cat = C.install_category
-        self.assertEqual(cat("USB\\VID_1234&PID_0F01\\TEST0001"), "connected device: USB")
-        self.assertEqual(cat("USBSTOR\\DISK&VEN_EXAMPLE\\TEST0001&0"), "connected device: USB storage")
-        self.assertEqual(cat("SWD\\WPDBUSENUM\\_??_EXAMPLE#TEST0001"), "connected device: portable device (SWD-WPD)")
-        self.assertEqual(cat("BTHENUM\\{0000111f-0000-1000-8000-00805f9b34fb}_X\\Y"), "connected device: Bluetooth")
-        self.assertEqual(cat("BTHLEDEVICE\\X\\Y"), "connected device: Bluetooth LE service")
-        self.assertEqual(cat(C.ROOT_HUB_PREFIX + "30\\4&1&0"), "internal/other: USB root hub (part of the PC)")
-        self.assertIn("HID", cat("USB\\VID_1234&PID_0F09\\TEST0009", C.HID_USB_SERVICE))
-        for enum in ("PCI", "HID", "ROOT", "ACPI"):
-            self.assertEqual(cat(enum + "\\EXAMPLE\\0"), "internal/other: " + enum)
+        usb = "USB-enumerated (external or built in)"
+        self.assertEqual(cat("USB\\VID_1234&PID_0F01\\TEST0001"), usb)
+        self.assertEqual(cat("USBSTOR\\DISK&VEN_EXAMPLE\\TEST0001&0"), "USB storage")
+        self.assertEqual(cat("SWD\\WPDBUSENUM\\_??_EXAMPLE#TEST0001"), "portable device (SWD-WPD)")
+        self.assertEqual(cat("BTHENUM\\{0000111f-0000-1000-8000-00805f9b34fb}_X\\Y"), "Bluetooth")
+        self.assertEqual(cat("BTHLE\\DEV_00005E005301\\8&1&0"), "Bluetooth LE")
+        self.assertEqual(cat("BTHLEDEVICE\\X\\Y"), "Bluetooth LE service")
+        self.assertEqual(cat(C.ROOT_HUB_PREFIX + "30\\4&1&0"), "USB root hub (internal)")
+        hid = cat("USB\\VID_1234&PID_0F09\\TEST0009", C.HID_USB_SERVICE)
+        self.assertTrue(hid.startswith(usb) and "HID" in hid, hid)
+        for p in C.DEVICE_PREFIXES:
+            self.assertNotIn("connected device", cat(p.rstrip("\\") + "\\EXAMPLE\\0"))   # built-in USB is not "connected"
 
-    def test_install_rows_have_a_category_and_are_all_kept(self):
-        ids = ["USB\\VID_1234&PID_0F01\\TEST0001", C.ROOT_HUB_PREFIX + "30\\4&1&0", "BTHENUM\\X\\Y"]
+    def test_every_kept_enumerator_has_a_category_and_no_other_does(self):
+        for p in C.DEVICE_PREFIXES:                # every id the C_install filter keeps gets a category
+            self.assertTrue(C.install_category(p.rstrip("\\") + "\\EXAMPLE\\0"), p)
+            self.assertTrue(C.install_category(p + "EXAMPLE\\0"), p)
+        for enum in ("PCI", "HID", "ROOT", "ACPI", "SWD\\EXAMPLEENUM", "DISPLAY"):
+            self.assertIsNone(C.install_category(enum + "\\EXAMPLE\\0"), enum)
+
+    def test_install_rows_keep_only_device_enumerators_and_the_basis_says_so(self):
+        ids = ["USB\\VID_1234&PID_0F01\\TEST0001", C.ROOT_HUB_PREFIX + "30\\4&1&0", "BTHENUM\\X\\Y",
+               "PCI\\VEN_1234&DEV_0F01\\3&1&0&A0", "ACPI\\EXAMPLE0001\\0"]
         text = "".join(f">>>  [Device Install (Hardware initiated) - {d}]\n>>>  Section start 2030/01/01 12:00:0{i}.000\n"
                        for i, d in enumerate(ids))
         g = build_from(C.FakeSource({}, text))
         v = g.views["C_install"]
         self.assertIn("Category", v.cols)
-        self.assertEqual([(r["DeviceID"], r["Category"].split(":")[0]) for r in v.rows],
-                         [(ids[0].upper(), "connected device"), (ids[1].upper(), "internal/other"),
-                          (ids[2].upper(), "connected device")])
+        self.assertEqual([(r["DeviceID"], r["Category"]) for r in v.rows],
+                         [(ids[0].upper(), "USB-enumerated (external or built in)"),
+                          (ids[1].upper(), "USB root hub (internal)"), (ids[2].upper(), "Bluetooth")])
         self.assertIn("Category", v.basis)
+        self.assertNotIn("every row is kept", v.basis)
+        kept = v.basis.split("Kept: ids whose enumerator is ")[1].split(" - ")[0].split(", ")
+        self.assertEqual(sorted(kept), sorted(p.rstrip("\\") for p in C.DEVICE_PREFIXES))
+        for said in ("PCI, ACPI", "not listed", "built in"):
+            self.assertIn(said, v.basis)
 
 
 class EventMatchedField(unittest.TestCase):
