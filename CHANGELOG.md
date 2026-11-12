@@ -4,6 +4,16 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- **Excel-style column filters on every table.** Each heading opens a panel with type-aware sorting (A → Z, Smallest → Largest, Oldest → Newest; blanks last), conditions (contains / begins with / greater than / between / before / after …), a value search, a tick list with counts, **(Select All)** and **(Blanks)**, and OK / Cancel. Filters on several columns combine; rows with no value or date are kept unless (Blanks) is unticked.
+- **Dates in every view:** a case-wide From / To range with quick ranges counted back from the newest date in the data, applied to every view.
+- **Honest counts:** filtered views show "112 of 686", checks show their problems ("2 issues / 28") and relations their matched rows ("69 of 91 linked").
+- **Filtered export:** only the rows shown, in the order shown, plus a `.filter.txt` sidecar recording view, sort, filters and counts.
+- **Recovered notifications whose record header was overwritten,** from their surviving JSON (`json-carved (record header lost)`), with a TimeBasis column (JSON `postTime` is Unix ms, the table's `post_time` FILETIME). Rows of WAL page versions replaced by a later frame are decoded (`wal-superseded`).
+- **Checks:** messages whose SIM is missing from `subscription` are reported with the other orphans.
+- Invisible characters are shown as `⟨U+200E⟩` etc.; keyboard: Ctrl+F, Ctrl+E, Ctrl+Shift+F, Alt+Down, F6.
+
 ### Fixed
 
 - **Package-wide data is credited to the right device.** The FullTrust `phone_apps.db` is shared by every device folder. It is now copied, hashed and carved once per run, and a live or carved `hosted_app_ids` row is credited to a device only when its `device_id` equals that device's folder GUID. Rows no folder owns are reported package-wide instead of in every device's report. A FullTrust carve error is reported instead of swallowed.
@@ -17,6 +27,13 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - **The upstream cross-match test can no longer pass without running.** Without `--upstream-maps` it reports `SKIP`; a missing, empty or too small folder (under 50 maps) fails. A map missing a required key is a clean failure. New `tests/test_run_tests.py` tests the harness itself.
 - **`Windows_YourPhone_PhotosDB.smap` v1.3:** the IdentifyQuery also checks the `thumbnail` and `media` columns its blob queries read (IdentifyValue 14).
 - `run_tests.py` writes its 0x1F join separator as an escape instead of a raw byte.
+- **Sync counters are not row counts.** The `content_sequence` check compares the sync counter with the expected counter (*same / differs*) instead of calling a mismatch "INCOMPLETE".
+- **A live `-shm` no longer fails the load** with a false hash mismatch; it is hashed as copied and not verified against its constantly changing source (the `.db` and `-wal` still are).
+- **A truncated database no longer aborts the run**; the file is named in a warning. A column or table missing in some Phone Link version is stated, not fatal. Threads are not called "aged out" when the message read failed.
+- **Portable devices (MTP)** reads both registry sources; phones and drives listed only under `Windows Portable Devices\Devices` were dropped.
+- **Phones (summary)** has one row per physical device instead of one per interface.
+- Pairing status wording agrees with its row count; connection events say which field matched (a parent-device match is labelled as a child device's event); first driver installs are categorised as connected device or internal hardware; times without a zone stay in the pairing history; streamed apps with no pairing folder are flagged; live views say when they were read.
+- The toolbar labels sit beside their own controls ("Device: 6" looked like a device number), and changing Nearby no longer re-copies the whole package.
 
 ### Changed
 
