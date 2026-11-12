@@ -1673,5 +1673,506 @@ class RebuildKeepsPackageCopyTest(unittest.TestCase):
                 app.on_close(warn=False)
 
 
+# ==================================================================== theme: dark mode, contrast, DPI, labels
+import json  # noqa: E402
+import pltheme as T  # noqa: E402
+
+COLOUR_OPTS = ("background", "foreground", "activebackground", "activeforeground", "selectcolor",
+               "highlightbackground", "highlightcolor", "insertbackground", "selectbackground", "selectforeground",
+               "disabledforeground", "disabledbackground", "readonlybackground", "buttonbackground", "troughcolor",
+               "inactiveselectbackground")
+TTK_CLASSES = {"TFrame", "Treeview", "TScrollbar", "TCombobox", "TSeparator", "TLabel", "TButton", "TEntry",
+               "TCheckbutton", "TPanedwindow", "TNotebook", "TSpinbox", "TProgressbar", "TScale", "TLabelframe",
+               "TMenubutton", "TRadiobutton", "TSizegrip"}
+
+
+class TkPath:
+    """A widget by its Tk path: also the ones Tk makes itself (a Combobox drop-down), which Python does not list."""
+
+    def __init__(self, app, path):
+        self.app, self.path = app, str(path)
+
+    def __str__(self):
+        return self.path
+
+    def __eq__(self, other):
+        return str(other) == self.path
+
+    def __hash__(self):
+        return hash(self.path)
+
+    def winfo_class(self):
+        return str(self.app.tk.call("winfo", "class", self.path))
+
+    def keys(self):
+        opts = (self.app.tk.splitlist(o) for o in self.app.tk.splitlist(self.app.tk.call(self.path, "configure")))
+        return [str(o[0])[1:] for o in opts if len(o) == 5]
+
+    def cget(self, opt):
+        return self.app.tk.call(self.path, "cget", "-" + opt)
+
+
+def walk(w, app=None):
+    app = app or w.winfo_toplevel()
+    yield TkPath(app, w)
+    for c in app.tk.splitlist(app.tk.call("winfo", "children", str(w))):
+        yield from walk(c, app)
+
+
+def norm(app, colour):
+    """'#rrggbb' for any Tk colour name, so 'white' and '#ffffff' compare equal."""
+    r, g, b = app.winfo_rgb(colour)
+    return f"#{r >> 8:02x}{g >> 8:02x}{b >> 8:02x}"
+
+
+class ThemePaletteTest(unittest.TestCase):
+    """Pure checks of the two palettes: no Tk needed."""
+
+    def test_contrast_formula(self):
+        self.assertAlmostEqual(T.contrast("#000000", "#ffffff"), 21.0, places=2)
+        self.assertAlmostEqual(T.contrast("#ffffff", "#ffffff"), 1.0, places=2)
+        self.assertAlmostEqual(T.contrast("#e08a00", "#ffffff"), 2.69, places=2)   # the old inferred orange
+
+    def test_both_palettes_have_the_same_roles(self):
+        self.assertEqual(set(T.PALETTES), {"light", "dark"})
+        self.assertEqual(set(T.PALETTES["light"]), set(T.PALETTES["dark"]))
+        for name, pal in T.PALETTES.items():
+            for role, c in pal.items():
+                self.assertRegex(c, r"^#[0-9a-f]{6}$", f"{name}.{role}")
+        for role in ("bg", "field", "panel", "panel_fg", "ink", "muted", "faint", "accent", "on_accent", "select_bg",
+                     "select_fg", "heading_bg", "warn", "status", "deleted", "on_kind"):
+            self.assertIn(role, T.PALETTES["light"], role)
+        for k in V.KIND:
+            self.assertIn("kind." + k, T.PALETTES["light"], k)
+
+    def test_every_text_pair_meets_wcag_aa(self):
+        self.assertTrue(T.TEXT_PAIRS)
+        for k in V.KIND:      # every kind colour is drawn as text on the page and in tables, and under badge text
+            for pair in ((f"kind.{k}", "bg"), (f"kind.{k}", "field"), ("on_kind", f"kind.{k}")):
+                self.assertIn(pair, T.TEXT_PAIRS)
+        for name in T.PALETTES:
+            bad = T.failing_pairs(name)
+            self.assertEqual(bad, [], f"{name}: pairs under {T.AA}:1 - " +
+                             ", ".join(f"{f} on {b} {r:.2f}" for f, b, r in bad))
+
+    def test_meanings_stay_distinguishable(self):
+        for name, pal in T.PALETTES.items():
+            hues = {k: T.hue(pal["kind." + k]) for k in ("check", "cross", "in-table")}
+            self.assertTrue(hues["check"] >= 345 or hues["check"] <= 15, f"{name}: check is not red ({hues})")
+            for a, b in (("check", "cross"), ("check", "in-table"), ("cross", "in-table")):
+                d = abs(hues[a] - hues[b])
+                self.assertGreaterEqual(min(d, 360 - d), 20, f"{name}: {a} and {b} look alike")
+
+
+class ThemeSettingsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"APPDATA": self.tmp.name})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_round_trip_in_appdata(self):
+        path = T.settings_path()
+        self.assertEqual(path, os.path.join(self.tmp.name, "phone-link-forensics", "viewer.json"))
+        self.assertIsNone(T.saved_mode())                 # nothing saved yet
+        self.assertTrue(T.save_mode("dark"))
+        self.assertEqual(T.saved_mode(), "dark")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["theme"], "dark")
+        self.assertEqual([n for n in os.listdir(os.path.dirname(path)) if n != "viewer.json"], [],
+                         "the atomic write leaves no temporary file")
+        T.save_settings({"theme": "light", "other": 1})
+        self.assertTrue(T.save_mode("system"))
+        self.assertEqual(T.load_settings(), {"theme": "system", "other": 1})   # other keys are kept
+
+    def test_corrupt_or_odd_file_falls_back(self):
+        path = T.settings_path()
+        os.makedirs(os.path.dirname(path))
+        for text in ("{not json", "[1, 2]", '{"theme": "purple"}', "\x00\xff"):
+            with open(path, "w", encoding="latin-1") as f:
+                f.write(text)
+            self.assertIsNone(T.saved_mode(), text)
+        self.assertTrue(T.save_mode("light"))            # a corrupt file is replaced
+        self.assertEqual(T.saved_mode(), "light")
+
+    def test_unwritable_place_is_not_an_error(self):
+        blocker = os.path.join(self.tmp.name, "phone-link-forensics")
+        with open(blocker, "w") as f:                    # a FILE where the folder should be
+            f.write("x")
+        self.assertFalse(T.save_mode("dark"))
+        self.assertIsNone(T.saved_mode())
+
+
+class ThemeWindowsReaderTest(unittest.TestCase):
+    """Follow Windows: AppsUseLightTheme through an injected reader - the real registry is never read here."""
+
+    def test_reader_values(self):
+        with mock.patch.object(T, "read_apps_use_light_theme", side_effect=AssertionError("real registry read")):
+            self.assertEqual(T.windows_theme(lambda: 0), "dark")
+            self.assertEqual(T.windows_theme(lambda: 1), "light")
+            self.assertEqual(T.windows_theme(lambda: None), "light")       # value missing
+            self.assertEqual(T.windows_theme(mock.Mock(side_effect=OSError)), "light")
+            self.assertEqual(T.resolve("system", lambda: 0), "dark")
+            self.assertEqual(T.resolve("dark", lambda: 1), "dark")
+            self.assertEqual(T.resolve("light", lambda: 0), "light")
+            self.assertEqual(T.next_mode("light"), "dark")
+            self.assertEqual(T.next_mode("dark"), "system")
+            self.assertEqual(T.next_mode("system"), "light")
+
+
+class TitleBarTest(unittest.TestCase):
+    class Win:
+        def winfo_id(self):
+            return 4242
+
+    def api(self, results=(0,)):
+        api = mock.Mock()
+        api.GetAncestor.return_value = 777
+        api.DwmSetWindowAttribute.side_effect = list(results)
+        return api
+
+    @staticmethod
+    def calls(api):
+        import ctypes
+        out = []
+        for c in api.DwmSetWindowAttribute.call_args_list:
+            hwnd, attr, ref, size = c.args
+            value = ref._obj.value if hasattr(ref, "_obj") else ctypes.cast(ref, ctypes.POINTER(ctypes.c_int))[0]
+            out.append((hwnd, attr, value, size))
+        return out
+
+    def test_dark_and_light(self):
+        api = self.api()
+        self.assertTrue(T.set_title_bar(self.Win(), True, api=api, os_name="nt"))
+        api.GetAncestor.assert_called_once_with(4242, 2)
+        self.assertEqual(self.calls(api), [(777, 20, 1, 4)])
+        self.assertEqual(api.SetWindowPos.call_count, 1)
+        flags = api.SetWindowPos.call_args.args[-1]
+        self.assertEqual(flags, 0x20 | 0x2 | 0x1 | 0x4)    # FRAMECHANGED | NOMOVE | NOSIZE | NOZORDER
+        api = self.api()
+        self.assertTrue(T.set_title_bar(self.Win(), False, api=api, os_name="nt"))
+        self.assertEqual(self.calls(api), [(777, 20, 0, 4)])
+
+    def test_old_windows_falls_back_to_19_and_errors_are_ignored(self):
+        api = self.api(results=(-2147024809, 0))            # E_INVALIDARG for 20, then 19 works
+        self.assertTrue(T.set_title_bar(self.Win(), True, api=api, os_name="nt"))
+        self.assertEqual([c[1] for c in self.calls(api)], [20, 19])
+        api = self.api()
+        api.DwmSetWindowAttribute.side_effect = OSError("no dwmapi")
+        self.assertFalse(T.set_title_bar(self.Win(), True, api=api, os_name="nt"))
+        api = self.api()
+        api.GetAncestor.side_effect = AttributeError
+        self.assertFalse(T.set_title_bar(self.Win(), True, api=api, os_name="nt"))
+
+    def test_nothing_off_windows(self):
+        api = self.api()
+        self.assertFalse(T.set_title_bar(self.Win(), True, api=api, os_name="posix"))
+        self.assertEqual(api.mock_calls, [])
+
+    def test_dpi_awareness_per_monitor_with_fallback(self):
+        api = mock.Mock()
+        self.assertEqual(T.dpi_aware(api=api, os_name="nt"), 2)
+        api.shcore.SetProcessDpiAwareness.assert_called_once_with(2)
+        api = mock.Mock()
+        api.shcore.SetProcessDpiAwareness.side_effect = OSError
+        self.assertEqual(T.dpi_aware(api=api, os_name="nt"), 1)
+        api.user32.SetProcessDPIAware.assert_called_once_with()
+        api = mock.Mock()
+        api.shcore.SetProcessDpiAwareness.side_effect = AttributeError
+        api.user32.SetProcessDPIAware.side_effect = AttributeError
+        self.assertIsNone(T.dpi_aware(api=api, os_name="nt"))
+        self.assertIsNone(T.dpi_aware(api=mock.Mock(), os_name="posix"))
+
+
+class ThemeViewerTest(unittest.TestCase):
+    """The viewer on the synthetic demo: every widget follows the palette, toggles, persistence, rows, labels."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = pldemo.build(os.path.join(self.tmp.name, "device"))
+        self.apps = []
+        self.bars = []
+        self.app = self.make()
+
+    def make(self, withdraw=True, **kw):
+        kw.setdefault("title_bar", lambda w, dark: self.bars.append(dark))
+        kw.setdefault("theme_reader", mock.Mock(side_effect=AssertionError("real registry read")))
+        app = V.Viewer([("demo", self.src)], **kw)
+        if withdraw:
+            app.withdraw()
+        app.update()
+        self.apps.append(app)
+        return app
+
+    def tearDown(self):
+        for a in self.apps:
+            try:
+                a.on_close(warn=False)
+            except Exception:
+                pass
+        self.tmp.cleanup()
+
+    def open_everything(self, app):
+        """The filter panel of a date column (with its quick-range buttons) and every Combobox drop-down."""
+        app.show("E_calls")
+        date_col = next(c for c in app.g.views["E_calls"].cols if app.col_type(c) == V.F.DATE)
+        panel = app.open_filter(date_col)
+        self.assertIsNotNone(panel)
+        self.assertTrue(panel.preset_btns)
+        for w in walk(app):
+            if w.winfo_class() == "TCombobox":
+                app.tk.call("ttk::combobox::PopdownWindow", w)      # creates the drop-down list
+        app.update()
+        return panel
+
+    def classic(self, app):
+        return [w for w in walk(app) if w.winfo_class() not in TTK_CLASSES]
+
+    def assert_palette(self, app, name):
+        pal = {c.lower() for c in T.PALETTES[name].values()}
+        seen = set()
+        for w in self.classic(app):
+            keys = set(w.keys())
+            for opt in COLOUR_OPTS:
+                if opt in keys:
+                    val = str(w.cget(opt))
+                    if val == "":
+                        continue
+                    self.assertIn(norm(app, val), pal, f"{name}: {w} ({w.winfo_class()}) {opt}={val}")
+                    seen.add(w.winfo_class())
+            if w.winfo_class() in ("Entry", "Spinbox", "Text", "Listbox"):
+                self.assertEqual(norm(app, w.cget("selectbackground")), T.PALETTES[name]["select_bg"], str(w))
+                self.assertEqual(norm(app, w.cget("selectforeground")), T.PALETTES[name]["select_fg"], str(w))
+                if w.winfo_class() != "Listbox":
+                    self.assertEqual(norm(app, w.cget("insertbackground")), T.PALETTES[name]["ink"], str(w))
+        for cls in ("Tk", "Frame", "Label", "Button", "Checkbutton", "Entry", "Spinbox", "Text", "Panedwindow",
+                    "Listbox"):
+            self.assertIn(cls, seen, f"no {cls} was checked - the walk missed part of the window")
+
+    # 4
+    def test_dark_mode_reaches_every_classic_widget_and_back(self):
+        app = self.app
+        self.open_everything(app)
+        self.assertIn(app.rangebar, list(walk(app)))          # the second toolbar row is part of the walk
+        app.apply_theme("dark")
+        app.update()
+        self.assert_palette(app, "dark")
+        light_bgs = {"#ffffff", "#f4f7fa"}
+        for w in self.classic(app):
+            if "background" in w.keys():
+                self.assertNotIn(norm(app, w.cget("background")), light_bgs, str(w))
+        app.apply_theme("light")
+        app.update()
+        self.assert_palette(app, "light")
+        self.assertEqual(norm(app, app.cget("background")), T.PALETTES["light"]["bg"])
+
+    def test_a_panel_opened_in_dark_mode_is_dark(self):
+        app = self.app
+        app.apply_theme("dark")
+        self.open_everything(app)
+        self.assert_palette(app, "dark")
+
+    # 5
+    def test_ttk_styles_and_tags_follow_the_palette(self):
+        app = self.app
+        for name in ("dark", "light"):
+            app.apply_theme(name)
+            pal = T.PALETTES[name]
+            st = V.ttk.Style(app)
+            lk = lambda *a: norm(app, st.lookup(*a))
+            self.assertEqual(lk("Treeview", "fieldbackground"), pal["field"])
+            self.assertEqual(lk("Treeview", "background"), pal["field"])
+            self.assertEqual(lk("Treeview", "foreground"), pal["ink"])
+            self.assertEqual(lk("Treeview", "background", ["selected"]), pal["select_bg"])
+            self.assertEqual(lk("Treeview", "foreground", ["selected"]), pal["select_fg"])
+            self.assertEqual(lk("Treeview.Heading", "background"), pal["heading_bg"])
+            self.assertEqual(lk("Treeview.Heading", "foreground"), pal["ink"])
+            self.assertEqual(lk("TCombobox", "fieldbackground", ["readonly"]), pal["field"])
+            self.assertEqual(lk("TCombobox", "foreground", ["readonly"]), pal["ink"])
+            self.assertEqual(lk("TScrollbar", "troughcolor"), pal["trough"])
+            tag = lambda tree, t: norm(app, tree.tag_configure(t, "foreground"))
+            self.assertEqual(tag(app.nav, "group"), pal["ink"])
+            self.assertEqual(tag(app.nav, "item"), pal["ink"])
+            self.assertEqual(tag(app.nav, "sub"), pal["muted"])
+            self.assertEqual(tag(app.nav, "inferred"), pal["kind.cross"])
+            self.assertEqual(tag(app.nav, "empty"), pal["faint"])
+            for k in V.KIND:
+                self.assertEqual(tag(app.links, k), pal["kind." + k], k)
+            self.assertEqual(norm(app, app.detail.tag_cget("k", "foreground")), pal["muted"])
+
+    # 6
+    def test_runtime_colours_follow_a_toggle(self):
+        app = self.app
+        app.show("R23")              # a check view: red badge and basis line
+        app._status("something went wrong", warn=True)
+        app.filter_var.set("x")
+        for name in ("dark", "light", "dark"):
+            app.apply_theme(name)
+            pal = T.PALETTES[name]
+            self.assertEqual(norm(app, app.kind_lbl.cget("background")), pal["kind.check"])
+            self.assertEqual(norm(app, app.kind_lbl.cget("foreground")), pal["on_kind"])
+            self.assertEqual(norm(app, app.basis_lbl.cget("foreground")), pal["kind.check"])
+            self.assertEqual(norm(app, app.filter_lbl.cget("foreground")), pal["ink"])
+            self.assertEqual(norm(app, app.filter_lbl.cget("background")), pal["bg"])
+            self.assertEqual(norm(app, app.status.cget("foreground")), pal["warn"])
+            self.assertEqual(norm(app, app.status.cget("background")), pal["panel"])
+        app._status("fine")
+        self.assertEqual(norm(app, app.status.cget("foreground")), T.PALETTES["dark"]["status"])
+        app.show("E_calls")
+        self.assertEqual(norm(app, app.kind_lbl.cget("background")), T.PALETTES["dark"]["kind.table"])
+
+    def test_hint_tooltip_uses_the_palette(self):
+        app = self.app
+        app.apply_theme("dark")
+        h = V.Hint(app.export_btn, "hello")
+        h._show()
+        try:
+            lbl = h.tip.winfo_children()[0]
+            self.assertEqual(norm(app, lbl.cget("background")), T.PALETTES["dark"]["tip_bg"])
+            self.assertEqual(norm(app, lbl.cget("foreground")), T.PALETTES["dark"]["tip_fg"])
+        finally:
+            h._leave()
+
+    def test_toolbar_control_shortcut_and_title_bar(self):
+        app = self.make(withdraw=False, theme_reader=lambda: 1)      # Windows apps set to light
+        self.assertEqual(app.theme_mode, "light")
+        self.assertEqual(app.theme_combo.get(), "Theme: Light")
+        self.assertIn(app.theme_combo, list(walk(app.export_btn.master)))       # on the toolbar
+        app.theme_combo.set("Theme: Dark")
+        app.theme_combo.event_generate("<<ComboboxSelected>>")
+        app.update()
+        self.assertEqual((app.theme_mode, app.theme_name), ("dark", "dark"))
+        self.assertEqual(self.bars[-1], True)
+        app.focus_force()
+        app.update()
+        app.event_generate("<Control-Shift-L>")      # dark -> follow Windows (the reader says light)
+        app.update()
+        self.assertEqual(app.theme_mode, "system")
+        self.assertEqual(app.theme_combo.get(), "Theme: Follow Windows")
+        self.assertEqual(self.bars[-1], False)
+        app.event_generate("<Control-L>")           # Shift+L can arrive as an upper-case L
+        app.update()
+        self.assertEqual(app.theme_mode, "light")
+
+    def test_follow_windows_polls_every_five_seconds(self):
+        answers = [1]
+        reader = mock.Mock(side_effect=lambda: answers[-1])
+        app = self.make(theme="system", theme_reader=reader)
+        self.assertEqual(app.theme_name, "light")
+        self.assertIsNotNone(app._theme_job)
+        self.assertEqual(V.THEME_POLL_MS, 5000)
+        answers.append(0)            # the user switches Windows to dark
+        app._poll_system()
+        self.assertEqual(app.theme_name, "dark")
+        self.assertEqual(norm(app, app.cget("background")), T.PALETTES["dark"]["bg"])
+        app.apply_theme("light")     # leaving system mode stops the polling
+        self.assertIsNone(app._theme_job)
+
+    def test_choice_is_saved_only_when_asked(self):
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {"APPDATA": appdata}):
+            app = self.make()                       # tests and --demo: nothing is read or written
+            app.set_theme_mode("dark")
+            app.set_theme_mode("light")
+            self.assertFalse(os.path.exists(os.path.join(appdata, "phone-link-forensics")))
+            path = T.settings_path()
+            app = self.make(settings_path=path, theme_reader=lambda: 1)
+            app.set_theme_mode("dark")
+            self.assertEqual(T.saved_mode(), "dark")
+            app.set_theme_mode("system")
+            self.assertEqual(T.saved_mode(), "system")
+
+    def test_cli_theme_and_settings(self):
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {"APPDATA": appdata}):
+            T.save_mode("dark")
+            self.assertEqual(V.startup_theme(None, demo=False, screenshot=None), ("dark", T.settings_path()))
+            self.assertEqual(V.startup_theme("light", demo=False, screenshot=None), ("light", T.settings_path()))
+            self.assertEqual(V.startup_theme(None, demo=True, screenshot=None), ("system", None))
+            self.assertEqual(V.startup_theme("dark", demo=True, screenshot=None), ("dark", None))
+            self.assertEqual(V.startup_theme(None, demo=False, screenshot="x.png"), ("system", None))
+            os.remove(T.settings_path())
+            self.assertEqual(V.startup_theme(None, demo=False, screenshot=None), ("system", T.settings_path()))
+            with mock.patch.object(T, "load_settings", side_effect=AssertionError("read")):
+                V.startup_theme("dark", demo=True, screenshot=None)
+                V.startup_theme(None, demo=False, screenshot="x.png")
+
+    # 10
+    def test_row_height_fits_the_font_at_high_dpi(self):
+        app = self.app
+        st = V.ttk.Style(app)
+        for display in (1.0, 1.5, 2.0):
+            app.tk.call("tk", "scaling", display * 96 / 72)
+            app.refit_fonts()
+            for style, fonts in (("Treeview", ("PL.body",)), ("Nav.Treeview", ("PL.body", "PL.group", "PL.italic"))):
+                rh = int(st.lookup(style, "rowheight"))
+                for f in fonts:
+                    line = V.tkfont.nametofont(f, root=app).metrics("linespace")
+                    self.assertGreaterEqual(rh, line + 2, f"{style} at {display:.0%}: {rh} < {f} {line}")
+            if display == 1.5:
+                self.assertGreaterEqual(int(st.lookup("Treeview", "rowheight")), 25)
+            if display == 2.0:
+                self.assertGreaterEqual(int(st.lookup("Treeview", "rowheight")), 32)
+
+    def test_named_fonts_replace_literal_tuples(self):
+        app = self.app
+        self.open_everything(app)
+        names = set(V.tkfont.names(app))
+        for f in ("PL.body", "PL.bold", "PL.italic", "PL.small", "PL.smallbold", "PL.group", "PL.title",
+                  "PL.viewtitle"):
+            self.assertIn(f, names)
+        for w in self.classic(app):
+            if "font" in w.keys():
+                self.assertIn(str(w.cget("font")), names | {"TkDefaultFont", "TkTextFont", "TkFixedFont"}, str(w))
+        with open(V.__file__, encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotRegex(src, r"\(\"(Segoe UI|Cambria)\"", "font tuples belong in pltheme")
+        self.assertNotRegex(src, r"#[0-9a-fA-F]{6}\b", "colours belong in pltheme")
+
+    # 11
+    def test_long_contents_label_is_ellipsized_with_a_tooltip(self):
+        app = self.make(withdraw=False)       # a hidden list has no width yet: it keeps the names whole
+        self.assertEqual(app.nav.item("N_notifications", "text"), "Notifications (live and recovered)")
+        long = "Notifications (live and recovered) with an unusually long synthetic name for the test"
+        with mock.patch.dict(V.NAV, {"N_notifications": ("notifications", None, long)}):
+            app.fill_nav()
+            app.nav.column("#0", width=180)
+            app.fit_nav_labels()
+            shown = app.nav.item("N_notifications", "text")
+            self.assertTrue(shown.endswith("…"), shown)
+            self.assertTrue(long.startswith(shown[:-1].rstrip()))
+            font = V.tkfont.nametofont("PL.body", root=app)
+            self.assertLessEqual(font.measure(shown), 180 - 2 * app.nav_indent())
+            self.assertEqual(app.nav_full["N_notifications"], long)
+            self.assertEqual(app.nav_tip_text("N_notifications"), long)
+            self.assertIsNone(app.nav_tip_text("grp:calls"))          # short names need no tooltip
+            tip = app.nav_tip.show("N_notifications")
+            try:
+                self.assertEqual(tip.winfo_children()[0].cget("text"), long)
+            finally:
+                app.nav_tip.hide()
+            count = app.nav.set("N_notifications", "rows")             # the count stays whole
+            self.assertTrue(count)
+            self.assertGreaterEqual(int(app.nav.column("rows", "width")), font.measure(count))
+            app.nav.column("#0", width=900)                             # wider again: the full name comes back
+            app.fit_nav_labels()
+            self.assertEqual(app.nav.item("N_notifications", "text"), long)
+            app.nav.column("#0", width=180)
+            app.fit_nav_labels()
+            app.show("E_calls")
+            app.nav.selection_set("N_notifications")
+            app.on_nav()
+            self.assertEqual(app.title_lbl.cget("text"), long)          # selected: the full name above the table
+
+    def test_fit_text(self):
+        m = lambda s: 10 * len(s)
+        self.assertEqual(T.fit_text("short", m, 100), "short")
+        self.assertEqual(T.fit_text("abcdefghij", m, 60), "abcde…")
+        self.assertEqual(T.fit_text("abc def ghi", m, 60), "abc d…")
+        self.assertEqual(T.fit_text("abc  def", m, 50), "abc…")      # no space before the ellipsis
+        self.assertEqual(T.fit_text("abcdef", m, 5), "…")
+
+
 if __name__ == "__main__":
     unittest.main()

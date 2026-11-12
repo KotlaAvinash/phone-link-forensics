@@ -11,6 +11,7 @@ Standard library only.
     python plmapview.py --input "<...\\LocalCache\\Indexed\\<GUID>\\System\\Database>"
     python plmapview.py --input "%LOCALAPPDATA%\\Packages\\Microsoft.YourPhone_8wekyb3d8bbwe"
     python plmapview.py --demo                  # synthetic data, nothing real
+    python plmapview.py --demo --theme dark     # light, dark or system (follow Windows); Ctrl+Shift+L switches
 """
 import argparse
 import csv
@@ -33,21 +34,32 @@ import plconnect as C  # noqa: E402
 import pldevices as D  # noqa: E402
 import plfilter as F  # noqa: E402
 import plrelate as R  # noqa: E402
+import pltheme as T  # noqa: E402
 
-BG, PANEL, INK, MUTED = "#f4f7fa", "#16293f", "#13233a", "#667c93"
-KIND = {  # kind -> (heading, colour, plain meaning)
-    "pc": ("Linked phones (this PC)", "#5d4037", "Every phone ever linked to this PC, from the package-level files"),
-    "conn": ("Phone connections - USB cable and Bluetooth (this PC)", "#37474f",
+# Colours and fonts live in pltheme, by role (light and dark). These names are the LIGHT values, kept for code that
+# reads them; the window itself always uses the palette in force (Viewer.pal).
+LIGHT = T.PALETTES["light"]
+BG, PANEL, INK, MUTED = LIGHT["bg"], LIGHT["panel"], LIGHT["ink"], LIGHT["muted"]
+KIND = {  # kind -> (heading, light colour (palette role "kind.<kind>"), plain meaning)
+    "pc": ("Linked phones (this PC)", LIGHT["kind.pc"],
+           "Every phone ever linked to this PC, from the package-level files"),
+    "conn": ("Phone connections - USB cable and Bluetooth (this PC)", LIGHT["kind.conn"],
              "Read live, read-only, from THIS computer's registry, setup logs and event logs - not from the evidence "
              "folder"),
-    "table": ("Table", "#1e3a56", "Rows of one table"),
-    "in-table": ("Inside one table", "#2e7d32", "Rows of the SAME table that belong together, or data packed inside a row"),
-    "in-db": ("Between tables of one database", "#00897b", "Tables in the SAME database file joined by an ID column"),
-    "check": ("Checks", "#c62828", "Rows whose partner is missing, or counts that disagree"),
-    "cross": ("Across databases", "#e08a00", "Joins between DIFFERENT database files - inferences, hidden by default"),
-    "map": ("SQLECmd map output", "#6a1b9a", "Exactly what the SQLECmd maps return"),
-    "provenance": ("Provenance", "#546e7a", "Where the copies came from and their hashes"),
+    "table": ("Table", LIGHT["kind.table"], "Rows of one table"),
+    "in-table": ("Inside one table", LIGHT["kind.in-table"],
+                 "Rows of the SAME table that belong together, or data packed inside a row"),
+    "in-db": ("Between tables of one database", LIGHT["kind.in-db"],
+              "Tables in the SAME database file joined by an ID column"),
+    "check": ("Checks", LIGHT["kind.check"], "Rows whose partner is missing, or counts that disagree"),
+    "cross": ("Across databases", LIGHT["kind.cross"],
+              "Joins between DIFFERENT database files - inferences, hidden by default"),
+    "map": ("SQLECmd map output", LIGHT["kind.map"], "Exactly what the SQLECmd maps return"),
+    "provenance": ("Provenance", LIGHT["kind.provenance"], "Where the copies came from and their hashes"),
 }
+APP_TITLE = "Phone Link Relations Viewer"
+THEME_LABELS = {"light": "Theme: Light", "dark": "Theme: Dark", "system": "Theme: Follow Windows"}
+THEME_POLL_MS = 5000       # Follow Windows: how often the Windows app colour is read again
 # ---------------------------------------------------------------- the view list (left column)
 # Plain-English names for the view list. The technical name (view code, file, table) is shown in the header
 # when a view is opened, so nothing is lost. Views not listed here fall back to a group chosen from their
@@ -214,7 +226,7 @@ VIEW_COL_ENTITY = {vid: {"MessageID": "sms"} for vid in ("R03", "R09", "R10", "R
 PHONE_LINK_PACKAGE = "Microsoft.YourPhone_8wekyb3d8bbwe"
 NEARBY_MIN, NEARBY_MAX = 1, 1440     # the Nearby box, in minutes
 DEMO_PATH = "(synthetic demo folder)"
-WARN_COLOUR, STATUS_COLOUR = "#ffb74d", "#9fb3c8"
+WARN_COLOUR, STATUS_COLOUR = LIGHT["warn"], LIGHT["status"]     # light values; roles "warn" and "status"
 # ---------------------------------------------------------------- sorting and filtering (logic in plfilter)
 DROP_MARK, FILTER_MARK, SORT_UP, SORT_DOWN = "▾", " ●", "▲", "▼"  # heading marks: text, so they
 CHECKED, UNCHECKED, PARTIAL = "☑", "☐", "▣"                             # follow the theme's colours
@@ -229,7 +241,18 @@ HINTS = {
              "are hidden too.",
     "range": "Applies to every view's main time column (pick it under “Filter on”). Dates as YYYY-MM-DD or "
              "YYYY-MM-DD HH:MM[:SS]; To is inclusive. Quick ranges end at the NEWEST time in the case, not now.",
+    "theme": "Light, dark, or follow the Windows app colour (checked every 5 seconds). Ctrl+Shift+L switches. "
+             "The choice is remembered for next time (not in --demo or --screenshot runs).",
 }
+
+
+def startup_theme(cli, demo, screenshot):
+    """(mode, settings file or None) at start-up: --theme, else the saved choice, else Follow Windows. A demo or
+    screenshot run never reads or writes the settings file."""
+    if demo or screenshot:
+        return cli or "system", None
+    path = T.settings_path()
+    return cli or T.saved_mode(path) or "system", path
 
 
 def nav_count_text(v, shown):
@@ -322,23 +345,32 @@ def write_csv_atomic(path, header, rows):
 
 
 def _dpi_aware():
-    """Crisp text on scaled Windows displays, and window coordinates that match the screen."""
-    if os.name == "nt":
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except (AttributeError, OSError):
-            pass
+    """Crisp text on scaled Windows displays, and window coordinates that match the screen (per monitor)."""
+    T.dpi_aware()
 
 
 class Viewer(tk.Tk):
     def __init__(self, devices, window_min=R.DEFAULT_WINDOW_MIN, initial=None, localcache=None, connections=None,
-                 redact=False, this_pc=False, live_source=None):
+                 redact=False, this_pc=False, live_source=None, theme="light", theme_reader=None,
+                 settings_path=None, title_bar=None):
         """this_pc: the examiner asked for this PC's live USB/Bluetooth views (--this-pc), so they stay whatever
         folder is opened later. live_source: makes the live source when a folder opened later is this PC's own
-        Phone Link package (default: plconnect.LiveSource on Windows; tests pass a fake)."""
+        Phone Link package (default: plconnect.LiveSource on Windows; tests pass a fake).
+        theme: "light", "dark" or "system" (follow Windows, read through theme_reader - default the registry).
+        settings_path: where a theme picked in the window is saved (None: never saved). title_bar(window, dark):
+        colours the Windows title bar (default pltheme.set_title_bar)."""
         _dpi_aware()
         super().__init__()
+        self.theme_reader = theme_reader
+        self.settings_path = settings_path
+        self.title_bar = title_bar or T.set_title_bar
+        self.theme_mode = theme if theme in T.MODES else "light"
+        self.theme_name = "light"
+        self.pal = T.PALETTES["light"]
+        self.themer = T.Themer(self.pal)
+        self.fonts = T.make_fonts(self)       # kept: the named fonts live as long as these objects
+        self._theme_job = self._title_job = self._nav_fit_job = None    # pending after() jobs
+        self.nav_full = {}        # Contents item -> its full name (the list may show it shortened)
         self.devices = devices
         self.localcache = localcache
         self.redact = redact  # demo / screenshots: never show this computer's real paths
@@ -370,106 +402,208 @@ class Viewer(tk.Tk):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h = min(1600, int(sw * 0.92)), min(960, int(sh * 0.88))
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(0, (sh - h) // 3)}")
-        self.basis_wrap = w - 400
-        self.configure(bg=BG)
+        self.basis_wrap = w - self.px(400)
         self._style()
         self._layout()
         self._layout_filters()
+        self.apply_theme(self.theme_mode)
+        self.bind("<Map>", lambda e: self._apply_title_bar() if e.widget is self else None, add="+")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.load_device(0, initial)
 
     # ------------------------------------------------------------ layout
+    def px(self, n):
+        """n pixels at 100 % display scaling, in this display's pixels."""
+        return T.px(self, n)
+
     def _style(self):
         st = ttk.Style(self)
         try:
             st.theme_use("clam")
         except tk.TclError:
             pass
-        st.configure("Treeview", rowheight=22, font=("Segoe UI", 9))
-        st.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
-        st.configure("Nav.Treeview", rowheight=22, font=("Segoe UI", 9))
+        st.configure("Treeview", font="PL.body")
+        st.configure("Treeview.Heading", font="PL.bold")
+        st.configure("Nav.Treeview", font="PL.body")
+        self._row_heights()
+
+    def _row_heights(self):
+        """Treeview rows tall enough for their fonts at this display's scaling (a fixed 22 px clips at 150 %)."""
+        st = ttk.Style(self)
+        st.configure("Treeview", rowheight=T.row_height(self, "PL.body", "PL.bold"))
+        st.configure("Nav.Treeview", rowheight=T.row_height(self, "PL.body", "PL.group", "PL.italic"))
+
+    def refit_fonts(self):
+        """The display scaling changed: measure the fonts again, then the rows and the Contents labels."""
+        T.refit_fonts(self)
+        self._row_heights()
+        self._fit_count_col()
+        self.fit_nav_labels()
+
+    # ------------------------------------------------------------ theme
+    def apply_theme(self, mode):
+        """Colour the whole window for mode "light", "dark" or "system" (follow Windows): ttk styles, the Combobox
+        lists, every classic widget (open filter panel included), the tags, the runtime colours (badge, basis
+        line, status) and the title bar. Polls Windows every THEME_POLL_MS while following it."""
+        self.theme_mode = mode if mode in T.MODES else "light"
+        self.theme_name = T.resolve(self.theme_mode, self.theme_reader)
+        self.pal = self.themer.pal = T.PALETTES[self.theme_name]
+        T.style_ttk(self, self.pal)
+        self._tag_colours()
+        self.themer.paint(self)        # runtime colours are registered roles, so they follow too
+        self.theme_combo.set(THEME_LABELS[self.theme_mode])
+        if self.g is not None and self.cur_vid in self.g.views:
+            self._filter_status()
+        self._schedule_theme_poll()
+        if self._title_job is None:
+            self._title_job = self.after_idle(self._apply_title_bar)
+
+    def set_theme_mode(self, mode):
+        """A theme picked in the window (toolbar or Ctrl+Shift+L): apply it and remember it, when allowed."""
+        self.apply_theme(mode)
+        if self.settings_path:
+            T.save_mode(self.theme_mode, self.settings_path)
+
+    def cycle_theme(self):
+        self.set_theme_mode(T.next_mode(self.theme_mode))
+        return "break"
+
+    def _theme_picked(self):
+        mode = next((m for m, label in THEME_LABELS.items() if label == self.theme_combo.get()), "light")
+        self.theme_combo.selection_clear()
+        self.set_theme_mode(mode)
+
+    def _cancel_job(self, attr):
+        """Cancel the pending after() job kept in self.<attr> (a direct call must not leave the timer behind)."""
+        job = getattr(self, attr, None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            setattr(self, attr, None)
+
+    def _schedule_theme_poll(self):
+        self._cancel_job("_theme_job")
+        if self.theme_mode == "system":
+            self._theme_job = self.after(THEME_POLL_MS, self._poll_system)
+
+    def _poll_system(self):
+        """Follow Windows: re-read the app colour; repaint only when it changed."""
+        self._cancel_job("_theme_job")
+        if self.theme_mode != "system":
+            return
+        if T.resolve("system", self.theme_reader) != self.theme_name:
+            self.apply_theme("system")
+        else:
+            self._schedule_theme_poll()
+
+    def _apply_title_bar(self):
+        self._cancel_job("_title_job")
+        try:
+            if self.winfo_exists() and self.winfo_ismapped():
+                self.title_bar(self, self.theme_name == "dark")
+        except tk.TclError:
+            pass
+
+    def _tag_colours(self):
+        p = self.pal
+        self.nav.tag_configure("group", foreground=p["ink"], font="PL.group")
+        self.nav.tag_configure("sub", foreground=p["muted"], font="PL.italic")
+        self.nav.tag_configure("item", foreground=p["ink"])
+        self.nav.tag_configure("inferred", foreground=p["kind.cross"])
+        self.nav.tag_configure("empty", foreground=p["faint"])   # a view with no rows
+        for k in KIND:
+            self.links.tag_configure(k, foreground=p["kind." + k])
+        self.detail.tag_configure("k", font="PL.bold", foreground=p["muted"])
 
     def _layout(self):
-        bar = tk.Frame(self, bg=PANEL, height=52)
+        role = self.themer.register       # colours by role (pltheme): the theme repaints them all
+        bar = role(tk.Frame(self, height=52), zone="panel")
         bar.pack(fill="x")
         # the controls are packed first so they always get their space; the title is what yields on a narrow window
-        self.export_btn = tk.Button(bar, text="Export view (CSV)", command=self.export, relief="flat", bg="#2ec4b6",
-                                    fg="white", padx=10)
+        self.theme_combo = ttk.Combobox(bar, state="readonly", width=21, values=list(THEME_LABELS.values()))
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._theme_picked())
+        self.theme_combo.pack(side="right", padx=(4, 10))
+        self.export_btn = role(tk.Button(bar, text="Export view (CSV)", command=self.export, relief="flat", padx=10),
+                               background="accent", foreground="on_accent", activebackground="accent",
+                               activeforeground="on_accent")
         self.export_btn.pack(side="right", padx=8)
-        self.open_btn = tk.Button(bar, text="Open folder...", command=self.open_folder, relief="flat", bg="#1e3a56",
-                                  fg="white", padx=10)
+        self.open_btn = tk.Button(bar, text="Open folder...", command=self.open_folder, relief="flat", padx=10)
         self.open_btn.pack(side="right", padx=4)
         self.cross_chk = tk.Checkbutton(bar, text="Show inferred matches", variable=self.show_cross,
-                                        command=self.on_cross_toggle, bg=PANEL, fg="#9fb3c8", selectcolor=PANEL,
-                                        activebackground=PANEL)
+                                        command=self.on_cross_toggle)
         self.cross_chk.pack(side="right", padx=12)
         # packed from the right: each control goes in BEFORE its label, so the label ends up on its left
         self.nearby_spin = tk.Spinbox(bar, from_=NEARBY_MIN, to=NEARBY_MAX, width=5, textvariable=self.window_min,
                                       command=self.rebuild)
         self.nearby_spin.bind("<Return>", lambda e: self.rebuild())
         self.nearby_spin.pack(side="right")
-        self.nearby_lbl = tk.Label(bar, text="Nearby (min):", bg=PANEL, fg="#9fb3c8")
+        self.nearby_lbl = tk.Label(bar, text="Nearby (min):")
         self.nearby_lbl.pack(side="right", padx=(12, 2))
         self.dev_combo = ttk.Combobox(bar, state="readonly", width=38,
                                       values=[f"{lbl}" for lbl, _ in self.devices])
         self.dev_combo.bind("<<ComboboxSelected>>", lambda e: self.load_device(self.dev_combo.current()))
-        self.dev_lbl = tk.Label(bar, text="Device:", bg=PANEL, fg="#9fb3c8")
+        self.dev_lbl = tk.Label(bar, text="Device:")
         if len(self.devices) > 1:
             self.dev_combo.pack(side="right")
             self.dev_lbl.pack(side="right", padx=(12, 2))
-        tk.Label(bar, text="Phone Link Relations Viewer", bg=PANEL, fg="white",
-                 font=("Cambria", 15, "bold")).pack(side="left", padx=14, pady=10)
+        # the title takes what the controls leave (width=1: it never pushes them) and is shortened with "…" to fit
+        self.app_title = role(tk.Label(bar, text=APP_TITLE, font="PL.title", anchor="w", width=1),
+                              foreground="panel_title")
+        self.app_title.pack(side="left", fill="x", expand=True, padx=14, pady=10)
+        self.app_title.bind("<Configure>", lambda e: self.app_title.config(text=T.fit_text(
+            APP_TITLE, tkfont.nametofont("PL.title", root=self).measure, max(1, e.width - 4))))
         # the source line has a row of its own, so a long path can never push a control off the toolbar
-        srcrow = tk.Frame(self, bg=PANEL)
+        srcrow = role(tk.Frame(self), zone="panel")
         srcrow.pack(fill="x")
-        self.src_lbl = tk.Label(srcrow, text="", bg=PANEL, fg="#9fb3c8", font=("Segoe UI", 9), anchor="w", width=1)
+        self.src_lbl = tk.Label(srcrow, text="", font="PL.body", anchor="w", width=1)
         self.src_lbl.pack(fill="x", padx=14, pady=(0, 6))
         self.src_lbl.bind("<Configure>", lambda e: self._fit_src())
 
-        body = tk.PanedWindow(self, orient="horizontal", sashwidth=4, bg=BG)
+        body = tk.PanedWindow(self, orient="horizontal", sashwidth=4)
         body.pack(fill="both", expand=True)
-        left = tk.Frame(body, bg="white")
-        body.add(left, minsize=260, width=430)
-        tk.Label(left, text="CONTENTS", bg="white", fg=MUTED, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12,
-                                                                                               pady=(10, 2))
-        navbox = tk.Frame(left, bg="white")
+        left = role(tk.Frame(body), zone="field")
+        body.add(left, minsize=self.px(260), width=self.px(430))
+        role(tk.Label(left, text="CONTENTS", font="PL.smallbold"), foreground="muted").pack(anchor="w", padx=12,
+                                                                                          pady=(10, 2))
+        navbox = tk.Frame(left)
         navbox.pack(fill="both", expand=True, padx=6, pady=6)
         self.nav = ttk.Treeview(navbox, columns=("rows",), show="tree", style="Nav.Treeview", selectmode="browse")
-        self.nav.column("#0", width=300, stretch=True)
-        self.nav.column("rows", width=64, anchor="e", stretch=False)   # row count, right-aligned
+        self.nav.column("#0", width=self.px(300), stretch=True)
+        self.nav.column("rows", width=self.px(64), anchor="e", stretch=False)   # row count, right-aligned
         nav_scroll = ttk.Scrollbar(navbox, orient="vertical", command=self.nav.yview)
         self.nav.configure(yscrollcommand=nav_scroll.set)
         nav_scroll.pack(side="right", fill="y")
         self.nav.pack(side="left", fill="both", expand=True)
         self.nav.bind("<<TreeviewSelect>>", self.on_nav)
-        self.nav.tag_configure("group", foreground=INK, font=("Segoe UI", 10, "bold"))
-        self.nav.tag_configure("sub", foreground=MUTED, font=("Segoe UI", 9, "italic"))
-        self.nav.tag_configure("item", foreground=INK)
-        self.nav.tag_configure("inferred", foreground=KIND["cross"][1])
-        self.nav.tag_configure("empty", foreground="#a0aebd")   # a view with no rows
+        for seq in ("<Configure>", "<Map>"):                 # names shortened to the width of the list ...
+            self.nav.bind(seq, lambda e: self._fit_nav_soon(), add="+")
+        self.nav_tip = TreeTip(self.nav, self.nav_tip_text)                     # ... and shown whole on hover
 
-        right = tk.PanedWindow(body, orient="vertical", sashwidth=4, bg=BG)
+        right = tk.PanedWindow(body, orient="vertical", sashwidth=4)
         body.add(right)
-        top = tk.Frame(right, bg=BG)
-        right.add(top, minsize=300)
-        head = tk.Frame(top, bg=BG)
+        top = tk.Frame(right)
+        right.add(top, minsize=self.px(300))
+        head = tk.Frame(top)
         head.pack(fill="x", padx=12, pady=(10, 0))
-        self.title_lbl = tk.Label(head, text="", bg=BG, fg=INK, font=("Cambria", 14, "bold"), anchor="w")
+        self.title_lbl = tk.Label(head, text="", font="PL.viewtitle", anchor="w")
         self.title_lbl.pack(side="left")
-        self.kind_lbl = tk.Label(head, text="", fg="white", font=("Segoe UI", 8, "bold"), padx=8)
+        self.kind_lbl = role(tk.Label(head, text="", font="PL.smallbold", padx=8),
+                             background="kind.table", foreground="on_kind")
         self.kind_lbl.pack(side="left", padx=10)
-        tk.Label(head, text="Filter:", bg=BG, fg=MUTED).pack(side="left", padx=(20, 4))
+        role(tk.Label(head, text="Filter:"), foreground="muted").pack(side="left", padx=(20, 4))
         self.filter_var = tk.StringVar(self)
         self._quiet = False      # True while show() clears the filter itself, so the table is filled once
         self.filter_var.trace_add("write", lambda *a: None if self._quiet else self._on_filter_text())
         self.filter_entry = tk.Entry(head, textvariable=self.filter_var, width=30)
         self.filter_entry.pack(side="left")
-        self.count_lbl = tk.Label(head, text="", bg=BG, fg=MUTED)
+        self.count_lbl = role(tk.Label(head, text=""), foreground="muted")
         self.count_lbl.pack(side="left", padx=10)
-        self.basis_lbl = tk.Label(top, text="", bg=BG, fg=INK, anchor="w", justify="left", wraplength=self.basis_wrap,
-                                  font=("Segoe UI", 9, "italic"))
+        self.basis_lbl = tk.Label(top, text="", anchor="w", justify="left", wraplength=self.basis_wrap,
+                                  font="PL.italic")
         self.basis_lbl.pack(fill="x", padx=12, pady=(4, 6))
-        wrap = tk.Frame(top, bg=BG)
+        wrap = tk.Frame(top)
         wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.table = ttk.Treeview(wrap, show="headings", selectmode="browse")
         ys = ttk.Scrollbar(wrap, orient="vertical", command=self.table.yview)
@@ -482,30 +616,26 @@ class Viewer(tk.Tk):
         wrap.columnconfigure(0, weight=1)
         self.table.bind("<<TreeviewSelect>>", self.on_row)
 
-        bottom = tk.PanedWindow(right, orient="horizontal", sashwidth=4, bg=BG)
-        right.add(bottom, minsize=180)
-        dframe = tk.Frame(bottom, bg=BG)
-        bottom.add(dframe, minsize=300)
-        tk.Label(dframe, text="SELECTED ROW", bg=BG, fg=MUTED, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12)
-        self.detail = tk.Text(dframe, height=9, wrap="word", bg="white", fg=INK, relief="flat",
-                              font=("Segoe UI", 9), padx=10, pady=6)
+        bottom = tk.PanedWindow(right, orient="horizontal", sashwidth=4)
+        right.add(bottom, minsize=self.px(180))
+        dframe = tk.Frame(bottom)
+        bottom.add(dframe, minsize=self.px(300))
+        role(tk.Label(dframe, text="SELECTED ROW", font="PL.smallbold"), foreground="muted").pack(anchor="w", padx=12)
+        self.detail = tk.Text(dframe, height=9, wrap="word", relief="flat", font="PL.body", padx=10, pady=6)
         self.detail.pack(fill="both", expand=True, padx=12, pady=(2, 8))
         self.detail.config(state="disabled")      # read-only, but the text can still be selected and copied
-        self.detail.tag_configure("k", font=("Segoe UI", 9, "bold"), foreground=MUTED)
         self.detail.bind("<Button-1>", lambda e: self.detail.focus_set())   # a disabled Text does not take focus itself
         self.detail.bind("<Control-a>", lambda e: (self.detail.tag_add("sel", "1.0", "end"), "break")[1])
-        lframe = tk.Frame(bottom, bg=BG)
-        bottom.add(lframe, minsize=420)
-        tk.Label(lframe, text="LINKED ROWS  (double-click or Enter to jump)", bg=BG, fg=MUTED,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=6)
+        lframe = tk.Frame(bottom)
+        bottom.add(lframe, minsize=self.px(420))
+        role(tk.Label(lframe, text="LINKED ROWS  (double-click or Enter to jump)", font="PL.smallbold"),
+             foreground="muted").pack(anchor="w", padx=6)
         self.links = ttk.Treeview(lframe, columns=("how", "target", "where", "scope"), show="headings", height=8)
         for c, w, t in (("target", 280, "Linked row"), ("where", 300, "Found in"), ("how", 380, "How it is linked"),
                         ("scope", 170, "Scope")):
             self.links.heading(c, text=t)
-            self.links.column(c, width=w, minwidth=80, anchor="w", stretch=False)
+            self.links.column(c, width=self.px(w), minwidth=self.px(80), anchor="w", stretch=False)
         self.links["displaycolumns"] = ("target", "where", "how", "scope")   # what it is and where, first
-        for k, (_, colour, _) in KIND.items():
-            self.links.tag_configure(k, foreground=colour)
         links_x = ttk.Scrollbar(lframe, orient="horizontal", command=self.links.xview)
         self.links.configure(xscrollcommand=links_x.set)
         links_x.pack(side="bottom", fill="x", padx=6)
@@ -515,8 +645,10 @@ class Viewer(tk.Tk):
         self.links.bind("<KP_Enter>", self.on_jump)
         self.link_targets = {}
 
-        self.status = tk.Label(self, text="", bg=PANEL, fg="#9fb3c8", anchor="w", font=("Segoe UI", 8), padx=12)
+        self.status = role(tk.Label(self, text="", anchor="w", font="PL.small", padx=12), zone="panel",
+                           foreground="status")
         self.status.pack(fill="x", side="bottom")
+        self._tag_colours()
 
     # ------------------------------------------------------------ data
     def nearby(self):
@@ -689,7 +821,8 @@ class Viewer(tk.Tk):
         note = getattr(self.ev, "snapshot_note", "") if self.ev else ""
         if note:
             text += f"  |  WARNING: {note}"
-        self.status.config(text=self._scrub(text), fg=WARN_COLOUR if warn or note else STATUS_COLOUR)
+        self.status.config(text=self._scrub(text))
+        self.themer.set(self.status, foreground="warn" if warn or note else "status")
 
     def _set_source(self, text):
         self.src_full = self._scrub(text)
@@ -716,6 +849,7 @@ class Viewer(tk.Tk):
             return
         opened = {i for i in self._all_nav_ids() if self.nav.item(i, "open")} if self.nav.get_children() else None
         self.nav.delete(*self.nav.get_children())
+        self.nav_full = {}
         shown = [v for v in self.g.views.values() if v.kind != "cross" or self.show_cross.get()]
         places = {v.vid: nav_place(v, self.built_min) for v in shown}
         rank = {vid: i for i, vid in enumerate(NAV)}
@@ -728,6 +862,7 @@ class Viewer(tk.Tk):
             node = f"grp:{gid}"
             self.nav.insert("", "end", iid=node, text=heading, values=("",), tags=("group",),
                             open=open_default if opened is None else node in opened)
+            self.nav_full[node] = heading
             data, subs = [], {}
             for v in views:
                 sub = places[v.vid][1]
@@ -739,8 +874,11 @@ class Viewer(tk.Tk):
                 sid = f"sub:{gid}:{sub}"
                 self.nav.insert(node, "end", iid=sid, text=SUBGROUPS.get(sub, sub), values=("",), tags=("sub",),
                                 open=False if opened is None else sid in opened)
+                self.nav_full[sid] = SUBGROUPS.get(sub, sub)
                 for v in members:
                     self._nav_item(sid, v, places)
+        self._fit_count_col()
+        self.fit_nav_labels()
         if self.cur_vid in self.g.views and self.nav.exists(self.cur_vid):
             self.nav.see(self.cur_vid)
             self.nav.selection_set(self.cur_vid)
@@ -748,6 +886,59 @@ class Viewer(tk.Tk):
     def _nav_item(self, parent, v, places):
         tags = ("empty",) if not v.rows else ("inferred",) if v.kind == "cross" else ("item",)
         self.nav.insert(parent, "end", iid=v.vid, text=places[v.vid][2], values=(self._nav_count(v),), tags=tags)
+        self.nav_full[v.vid] = places[v.vid][2]
+
+    # ---- Contents names that do not fit: shortened with an ellipsis, whole in a hover tip and above the table
+    def nav_indent(self):
+        """Pixels each Contents level is indented by (Tk 8.6: 20 px; Tk 9: 15 points)."""
+        st = ttk.Style(self)
+        v = st.lookup("Nav.Treeview", "indent") or st.lookup("Treeview", "indent")
+        try:
+            return int(round(self.winfo_fpixels(v))) if v else 20
+        except tk.TclError:
+            return 20
+
+    def _fit_nav_soon(self):
+        if self._nav_fit_job is None:
+            self._nav_fit_job = self.after_idle(self.fit_nav_labels)
+
+    def fit_nav_labels(self):
+        """Shorten every Contents name to the width of its column, measured in its own font."""
+        self._cancel_job("_nav_fit_job")
+        # a hidden list has no real width yet: names stay whole until it is shown (<Map> / <Configure> refit them)
+        width = int(self.nav.column("#0", "width")) if self.nav.winfo_ismapped() else 1 << 30
+        indent = self.nav_indent()
+        fonts = {"group": tkfont.nametofont("PL.group", root=self), "sub": tkfont.nametofont("PL.italic", root=self)}
+        body = tkfont.nametofont("PL.body", root=self)
+        for iid, full in list(self.nav_full.items()):
+            if not self.nav.exists(iid):
+                del self.nav_full[iid]
+                continue
+            depth, p = 0, self.nav.parent(iid)
+            while p:
+                depth, p = depth + 1, self.nav.parent(p)
+            tags = self.nav.item(iid, "tags")
+            font = fonts.get(tags[0], body) if tags else body
+            # the text starts after the indent of its level and the open/close arrow (about one indent wide)
+            text = T.fit_text(full, font.measure, width - (depth + 1) * indent - self.px(6))
+            if self.nav.item(iid, "text") != text:
+                self.nav.item(iid, text=text)
+
+    def _fit_count_col(self):
+        """The count column as wide as its widest count, so '2 issues / 28' is never cut."""
+        font = tkfont.nametofont("PL.body", root=self)
+        texts = [str(self.nav.set(i, "rows")) for i in self.nav_full if self.nav.exists(i)]
+        width = max([self.px(64)] + [font.measure(t) + self.px(14) for t in texts])
+        if int(self.nav.column("rows", "width")) != width:
+            self.nav.column("rows", width=width)
+            self._fit_nav_soon()
+
+    def nav_tip_text(self, iid):
+        """The full name of a Contents entry when the list shows it shortened, else None."""
+        full = self.nav_full.get(iid)
+        if full and self.nav.exists(iid) and self.nav.item(iid, "text") != full:
+            return full
+        return None
 
     def _all_nav_ids(self, parent=""):
         out = []
@@ -788,16 +979,19 @@ class Viewer(tk.Tk):
         if not from_nav and self.nav.exists(vid):
             self.nav.selection_set(vid)
             self.nav.see(vid)
-        name, colour, meaning = KIND[v.kind]
-        self.title_lbl.config(text=nav_place(v, self.built_min)[2])
-        self.kind_lbl.config(text=BADGE.get(v.kind, v.kind.upper()), bg=colour)
+        name, _, meaning = KIND[v.kind]
+        kind_role = "kind." + v.kind if "kind." + v.kind in self.pal else "kind.table"
+        self.title_lbl.config(text=nav_place(v, self.built_min)[2])     # the full name, however the list shows it
+        self.kind_lbl.config(text=BADGE.get(v.kind, v.kind.upper()))
+        self.themer.set(self.kind_lbl, background=kind_role, foreground="on_kind")
         where = f"{v.db}  -  " if v.db else ""
         self.basis_lbl.config(text=self._scrub(f"{where}{meaning}.   Source: {v.basis}.   Technical name: {v.vid} "
-                                               f"\u2013 {v.title}"), fg=colour)
+                                               f"\u2013 {v.title}"))
+        self.themer.set(self.basis_lbl, foreground=kind_role)
         self.table["columns"] = v.cols
         for c in v.cols:
             self.table.heading(c, text=c, command=lambda c=c: self.open_filter(c))
-            self.table.column(c, width=260 if c in WIDE else max(80, min(220, 9 * len(c) + 40)), anchor="w",
+            self.table.column(c, width=self.px(260 if c in WIDE else max(80, min(220, 9 * len(c) + 40))), anchor="w",
                               stretch=False)
         if select_index is not None and self.filter_var.get():
             self._quiet = True
@@ -847,16 +1041,17 @@ class Viewer(tk.Tk):
     def _layout_filters(self):
         """The case-wide date range (a second toolbar row), the filter line above the table, the keyboard
         shortcuts and the hover hints. Built after _layout, from new widgets only."""
-        row = tk.Frame(self, bg=PANEL)
+        role = self.themer.register
+        row = role(tk.Frame(self), zone="panel")
         row.pack(fill="x", after=self.export_btn.master)
         self.rangebar = row
-        lab = dict(bg=PANEL, fg=STATUS_COLOUR, font=("Segoe UI", 9))
+        lab = dict(font="PL.body")
         pad = dict(pady=(0, 6))
         self.clear_btn = tk.Button(row, text="Clear all filters", command=self.clear_all_filters, relief="flat",
-                                   bg="#1e3a56", fg="white", padx=10)
+                                   padx=10)
         self.clear_btn.pack(side="right", padx=8, **pad)
-        tk.Label(row, text="Dates in every view", bg=PANEL, fg="white",
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(14, 4), **pad)
+        role(tk.Label(row, text="Dates in every view", font="PL.bold"),
+             foreground="panel_title").pack(side="left", padx=(14, 4), **pad)
         self.range_from, self.range_to = tk.StringVar(self), tk.StringVar(self)
         self.range_keep = tk.BooleanVar(self, value=True)
         # packed from the left: each label goes in before its control, so it sits on the control's left
@@ -871,26 +1066,25 @@ class Viewer(tk.Tk):
         for e in (self.from_entry, self.to_entry):
             e.bind("<Return>", lambda ev: self.apply_range())
             e.bind("<KP_Enter>", lambda ev: self.apply_range())
-        self.range_apply_btn = tk.Button(row, text="Apply", command=self.apply_range, relief="flat", bg="#2ec4b6",
-                                         fg="white", padx=8)
+        self.range_apply_btn = role(tk.Button(row, text="Apply", command=self.apply_range, relief="flat", padx=8),
+                                    background="accent", foreground="on_accent", activebackground="accent",
+                                    activeforeground="on_accent")
         self.range_apply_btn.pack(side="left", padx=(8, 2), **pad)
         self.preset_combo = ttk.Combobox(row, state="readonly", width=20, values=list(F.PRESETS))
         self.preset_combo.set("Quick range…")
         self.preset_combo.bind("<<ComboboxSelected>>", lambda e: self.range_preset(self.preset_combo.get()))
         self.preset_combo.pack(side="left", padx=(6, 2), **pad)
-        self.range_clear_btn = tk.Button(row, text="Clear dates", command=self.clear_range, relief="flat",
-                                         bg="#1e3a56", fg="white", padx=8)
+        self.range_clear_btn = tk.Button(row, text="Clear dates", command=self.clear_range, relief="flat", padx=8)
         self.range_clear_btn.pack(side="left", padx=(6, 2), **pad)
         self.keep_chk = tk.Checkbutton(row, text="Keep undated rows", variable=self.range_keep,
-                                       command=self._keep_changed, bg=PANEL, fg=STATUS_COLOUR, selectcolor=PANEL,
-                                       activebackground=PANEL)
+                                       command=self._keep_changed)
         self.keep_chk.pack(side="left", padx=(8, 2), **pad)
         self.on_lbl = tk.Label(row, text="Filter on:", **lab)
         self.on_lbl.pack(side="left", padx=(12, 2), **pad)
         self.range_col_combo = ttk.Combobox(row, state="disabled", width=22)
         self.range_col_combo.bind("<<ComboboxSelected>>", lambda e: self.on_range_col())
         self.range_col_combo.pack(side="left", **pad)
-        self.range_err = tk.Label(row, text="", bg=PANEL, fg=WARN_COLOUR, font=("Segoe UI", 9), anchor="w")
+        self.range_err = role(tk.Label(row, text="", font="PL.body", anchor="w"), foreground="warn")
         self.range_err.pack(side="left", padx=(10, 2), **pad)
         for w in (self.from_lbl, self.from_entry, self.to_lbl, self.to_entry, self.preset_combo, self.keep_chk,
                   self.on_lbl, self.range_col_combo):
@@ -898,14 +1092,16 @@ class Viewer(tk.Tk):
         self._hint(self.nearby_spin, HINTS["nearby"])
         self._hint(self.nearby_lbl, HINTS["nearby"])
         self._hint(self.cross_chk, HINTS["cross"])
+        self._hint(self.theme_combo, HINTS["theme"])
         self._hint(self.clear_btn, "Clear every column filter in every view, the case-wide dates and the text "
                                    "filter (Ctrl+Shift+F). Sorting stays.")
         # the filter line: what is filtered and sorted in this view, and the counts
-        self.filter_lbl = tk.Label(self.table.master.master, text="", bg=BG, fg=INK, anchor="w", justify="left",
-                                   wraplength=self.basis_wrap, font=("Segoe UI", 9))
+        self.filter_lbl = tk.Label(self.table.master.master, text="", anchor="w", justify="left",
+                                   wraplength=self.basis_wrap, font="PL.body")
         self.filter_lbl.pack(fill="x", padx=12, pady=(0, 4), before=self.table.master)
-        self.nav.column("#0", width=230)       # the names stretch into what is left ...
-        self.nav.column("rows", width=130)     # ... after room for "112 of 686" and "2 issues / 28"
+        self.nav.column("#0", width=self.px(230))      # the names stretch into what is left after the counts
+        for seq in ("<Control-L>", "<Control-Shift-L>"):   # light -> dark -> follow Windows -> light
+            self.bind(seq, lambda e: self.cycle_theme())
         # keyboard
         self.filter_entry.bind("<Key>", self._key_typed)
         self.bind("<Control-f>", lambda e: self._focus_filter())
@@ -991,6 +1187,7 @@ class Viewer(tk.Tk):
         for vid, v in self.g.views.items():
             if self.nav.exists(vid):
                 self.nav.set(vid, "rows", self._nav_count(v))
+        self._fit_count_col()
 
     def heading_text(self, col, vid=None):
         """'Name ▾', 'StartUTC ▼ ▾ ●' (sorted newest first, filtered)."""
@@ -1391,6 +1588,10 @@ class Viewer(tk.Tk):
 
     def on_close(self, warn=True):
         self._cancel_filter_job()
+        self.theme_mode = "light"          # stops Follow Windows polling
+        self._schedule_theme_poll()
+        for attr in ("_title_job", "_nav_fit_job"):
+            self._cancel_job(attr)
         if self.ev:
             self._remember(self.ev.close())
         if self.pc:
@@ -1482,7 +1683,9 @@ class FilterPanel(tk.Frame):
     applies. The logic is in plfilter; this only draws it."""
 
     def __init__(self, app, vid, col):
-        super().__init__(app, bg=BG, highlightthickness=1, highlightbackground=PANEL, highlightcolor=PANEL, bd=0)
+        super().__init__(app, highlightthickness=1, bd=0)
+        role = app.themer.register        # colours by role: the panel follows the theme, also when it changes
+        role(self, zone="page", highlightbackground="outline", highlightcolor="outline")
         self.app, self.vid, self.col = app, vid, col
         v = app.g.views[vid]
         self.ctype = ctype = app.col_type(col, vid)
@@ -1498,26 +1701,28 @@ class FilterPanel(tk.Frame):
         self.checklist = F.Checklist(items, blanks, ticked=cur.values if cur else None,
                                      keep_blanks=cur.blanks if cur else True)
         self._groups = {}
-        font, small = ("Segoe UI", 9), ("Segoe UI", 8)
-        flat = dict(relief="flat", bg=BG, fg=INK, activebackground=BG, anchor="w", font=font, padx=6)
+        font, small = "PL.body", "PL.small"
+        flat = dict(relief="flat", anchor="w", font=font, padx=6)
+        flat_roles = dict(background="bg", foreground="ink", activebackground="hover", activeforeground="ink")
+        muted = dict(foreground="muted")
 
-        tk.Label(self, text=col, bg=BG, fg=INK, font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x", padx=10,
-                                                                                           pady=(8, 0))
-        tk.Label(self, text=f"{ctype} column - {len(v.rows):,} rows", bg=BG, fg=MUTED, font=small,
-                 anchor="w").pack(fill="x", padx=10)
+        tk.Label(self, text=col, font="PL.group", anchor="w").pack(fill="x", padx=10, pady=(8, 0))
+        role(tk.Label(self, text=f"{ctype} column - {len(v.rows):,} rows", font=small, anchor="w"),
+             **muted).pack(fill="x", padx=10)
         self.sort_btns = []
         for desc, label in enumerate(F.sort_labels(ctype)):
-            b = tk.Button(self, text=label, command=lambda d=bool(desc): self.sort(d), **flat)
+            b = role(tk.Button(self, text=label, command=lambda d=bool(desc): self.sort(d), **flat), **flat_roles)
             b.pack(fill="x", padx=4)
             self.sort_btns.append(b)
-        self.clear_btn = tk.Button(self, text=f'Clear filter from "{col}"', command=self.clear,
-                                   state="normal" if cur is not None and cur.active else "disabled", **flat)
+        self.clear_btn = role(tk.Button(self, text=f'Clear filter from "{col}"', command=self.clear,
+                                        state="normal" if cur is not None and cur.active else "disabled", **flat),
+                              **flat_roles)
         self.clear_btn.pack(fill="x", padx=4)
         ttk.Separator(self).pack(fill="x", padx=6, pady=4)
 
-        box = tk.Frame(self, bg=BG)
+        box = tk.Frame(self)
         box.pack(fill="x", padx=10)
-        tk.Label(box, text="Condition:", bg=BG, fg=MUTED, font=font).grid(row=0, column=0, sticky="w")
+        role(tk.Label(box, text="Condition:", font=font), **muted).grid(row=0, column=0, sticky="w")
         self.op_var = tk.StringVar(self, value=cur.cond.op if cur is not None and cur.cond else NONE_OP)
         self.op_combo = ttk.Combobox(box, textvariable=self.op_var, state="readonly", width=18,
                                      values=[NONE_OP] + F.OPS[ctype])
@@ -1526,54 +1731,57 @@ class FilterPanel(tk.Frame):
         self.b_var = tk.StringVar(self, value=cur.cond.b if cur is not None and cur.cond else "")
         self.a_entry = tk.Entry(box, textvariable=self.a_var, width=19)
         self.a_entry.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        tk.Label(box, text="to" if ctype == F.DATE else "and", bg=BG, fg=MUTED, font=font).grid(row=1, column=2,
+        role(tk.Label(box, text="to" if ctype == F.DATE else "and", font=font), **muted).grid(row=1, column=2,
                                                                                             padx=4, pady=(4, 0))
         self.b_entry = tk.Entry(box, textvariable=self.b_var, width=19)
         self.b_entry.grid(row=1, column=3, sticky="w", pady=(4, 0))
         self.preset_btns = []
         if ctype == F.DATE:
-            tk.Label(box, text=f"Dates: {F.DATE_HELP}; To is inclusive", bg=BG, fg=MUTED,
-                     font=small).grid(row=2, column=0, columnspan=4, sticky="w")
-            quick = tk.Frame(box, bg=BG)
+            role(tk.Label(box, text=f"Dates: {F.DATE_HELP}; To is inclusive", font=small),
+                 **muted).grid(row=2, column=0, columnspan=4, sticky="w")
+            quick = tk.Frame(box)
             quick.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
-            tk.Label(quick, text="Newest in column, back:", bg=BG, fg=MUTED, font=small).pack(side="left")
+            role(tk.Label(quick, text="Newest in column, back:", font=small), **muted).pack(side="left")
             for name in F.PRESETS:
-                b = tk.Button(quick, text=name.replace("Last ", "").replace(" of data", ""), relief="flat",
-                              bg=BG, fg=KIND["in-table"][1], activebackground=BG, font=small, padx=4,
-                              command=lambda n=name: self.preset(n))
+                b = role(tk.Button(quick, text=name.replace("Last ", "").replace(" of data", ""), relief="flat",
+                                   font=small, padx=4, command=lambda n=name: self.preset(n)),
+                         background="bg", foreground="kind.in-table", activebackground="hover",
+                         activeforeground="kind.in-table")
                 b.pack(side="left")
                 self.preset_btns.append(b)
-        self.error_lbl = tk.Label(self, text="", bg=BG, fg=ERR_COLOUR, font=font, anchor="w", justify="left",
-                                  wraplength=330)
+        wrap = app.px(330)
+        self.error_lbl = role(tk.Label(self, text="", font=font, anchor="w", justify="left", wraplength=wrap),
+                              foreground="kind.check")
         self.error_lbl.pack(fill="x", padx=10)
         self.blanks_var = tk.BooleanVar(self, value=self.checklist.blanks)
-        self.blanks_chk = tk.Checkbutton(self, variable=self.blanks_var, bg=BG, fg=INK, activebackground=BG,
-                                         anchor="w", font=font)
+        self.blanks_chk = tk.Checkbutton(self, variable=self.blanks_var, anchor="w", font=font)
         self.blanks_chk.pack(fill="x", padx=8)
         ttk.Separator(self).pack(fill="x", padx=6, pady=4)
 
-        tk.Label(self, text="Search values", bg=BG, fg=MUTED, font=small, anchor="w").pack(fill="x", padx=10)
+        role(tk.Label(self, text="Search values", font=small, anchor="w"), **muted).pack(fill="x", padx=10)
         self.search_var = tk.StringVar(self)
         self.search_entry = tk.Entry(self, textvariable=self.search_var)
         self.search_entry.pack(fill="x", padx=10, pady=(0, 4))
-        lst = tk.Frame(self, bg=BG)
+        lst = tk.Frame(self)
         lst.pack(fill="both", expand=True, padx=10)
         self.list = ttk.Treeview(lst, show="tree", selectmode="browse", height=11)
-        self.list.column("#0", width=320, stretch=True)
+        self.list.column("#0", width=app.px(320), stretch=True)
         ys = ttk.Scrollbar(lst, orient="vertical", command=self.list.yview)
         self.list.configure(yscrollcommand=ys.set)
         ys.pack(side="right", fill="y")
         self.list.pack(side="left", fill="both", expand=True)
-        self.cap_lbl = tk.Label(self, text="", bg=BG, fg=MUTED, font=small, anchor="w", justify="left",
-                                wraplength=330)
+        self.cap_lbl = role(tk.Label(self, text="", font=small, anchor="w", justify="left", wraplength=wrap),
+                            **muted)
         self.cap_lbl.pack(fill="x", padx=10)
-        btns = tk.Frame(self, bg=BG)
+        btns = tk.Frame(self)
         btns.pack(fill="x", padx=10, pady=8)
-        self.cancel_btn = tk.Button(btns, text="Cancel", width=9, command=self.cancel, relief="flat", bg="#1e3a56",
-                                    fg="white")
+        self.cancel_btn = tk.Button(btns, text="Cancel", width=9, command=self.cancel, relief="flat")
         self.cancel_btn.pack(side="right", padx=(6, 0))
-        self.ok_btn = tk.Button(btns, text="OK", width=9, command=self.ok, relief="flat", bg="#2ec4b6", fg="white")
+        self.ok_btn = role(tk.Button(btns, text="OK", width=9, command=self.ok, relief="flat"),
+                           background="accent", foreground="on_accent", activebackground="accent",
+                           activeforeground="on_accent")
         self.ok_btn.pack(side="right")
+        app.themer.paint(self)
 
         self.op_var.trace_add("write", lambda *a: self._op_changed())
         self.blanks_var.trace_add("write", lambda *a: self._blanks_changed())
@@ -1614,7 +1822,7 @@ class FilterPanel(tk.Frame):
         x = sum(widths[:cols.index(self.col)]) if self.col in cols else 0
         x -= t.xview()[0] * sum(widths)
         x += t.winfo_rootx() - app.winfo_rootx()
-        y = t.winfo_rooty() - app.winfo_rooty() + 24
+        y = t.winfo_rooty() - app.winfo_rooty() + app.px(24)
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
         x = max(4, min(int(x), app.winfo_width() - w - 4))
         y = max(4, min(int(y), app.winfo_height() - h - 4))
@@ -1826,12 +2034,83 @@ class Hint:
             tip = tk.Toplevel(self.widget)
             tip.wm_overrideredirect(True)
             tip.geometry(f"+{self.widget.winfo_rootx()}+{self.widget.winfo_rooty() + self.widget.winfo_height() + 4}")
-            tk.Label(tip, text=self.text, bg=INK, fg="white", font=("Segoe UI", 9), justify="left", wraplength=420,
-                     padx=8, pady=6).pack()
+            tip_label(tip, self.text)
             self.tip = tip
         except tk.TclError:
             pass
 
+
+def tip_label(tip, text):
+    """The text of a hover tip, in the tip colours of the window's theme."""
+    lbl = tk.Label(tip, text=text, font="PL.body", justify="left", wraplength=T.px(tip, 420), padx=8, pady=6)
+    lbl.pack()
+    themer = getattr(tip.master.winfo_toplevel(), "themer", None)      # the viewer the tip belongs to
+    if themer is not None:
+        themer.set(tip, zone="tip")
+    else:
+        light = T.PALETTES["light"]
+        tip.configure(background=light["tip_bg"])
+        lbl.configure(background=light["tip_bg"], foreground=light["tip_fg"])
+    return lbl
+
+
+class TreeTip:
+    """A hover tip for the rows of a Treeview whose text is shown shortened: text_for(iid) gives the full text,
+    or None when the row shows it whole."""
+
+    def __init__(self, tree, text_for):
+        self.tree, self.text_for = tree, text_for
+        self.iid = self.tip = self.job = None
+        tree.bind("<Motion>", self._motion, add="+")
+        tree.bind("<Leave>", lambda e: self.hide(), add="+")
+        tree.bind("<ButtonPress>", lambda e: self.hide(), add="+")
+
+    def _motion(self, e):
+        iid = self.tree.identify_row(e.y)
+        if iid == self.iid:
+            return
+        self.hide()
+        self.iid = iid
+        if iid and self.text_for(iid):
+            self.job = self.tree.after(500, lambda: self.show(iid))
+
+    def show(self, iid):
+        """Show the full text of row iid under it; returns the tip window (or None)."""
+        self.job = None
+        text = self.text_for(iid)
+        if not text:
+            return None
+        self.hide_tip()
+        try:
+            tip = tk.Toplevel(self.tree)
+            tip.wm_overrideredirect(True)
+            box = self.tree.bbox(iid) if self.tree.exists(iid) else ""
+            x = self.tree.winfo_rootx() + (box[0] if box else 0)
+            y = self.tree.winfo_rooty() + (box[1] + box[3] if box else 0) + 2
+            tip.geometry(f"+{x}+{y}")
+            tip_label(tip, text)
+            self.tip = tip
+        except tk.TclError:
+            return None
+        return self.tip
+
+    def hide_tip(self):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
+
+    def hide(self):
+        if self.job is not None:
+            try:
+                self.tree.after_cancel(self.job)
+            except tk.TclError:
+                pass
+            self.job = None
+        self.iid = None
+        self.hide_tip()
 
 def stale_copies(exclude=()):
     """Copy folders left in the temp folder by earlier runs that still hold databases."""
@@ -1861,7 +2140,11 @@ def main():
     ap.add_argument("--this-pc", action="store_true",
                     help="also show phones connected to THIS computer by USB cable or Bluetooth (live registry, logs "
                          "and event logs, read-only). On by default when --input is this PC's own Phone Link folder")
+    ap.add_argument("--theme", choices=T.MODES,
+                    help="light, dark, or system (follow the Windows app colour). Default: the theme last picked in "
+                         "the window, else system. --demo and --screenshot runs never read or save that choice")
     a = ap.parse_args()
+    theme, settings = startup_theme(a.theme, a.demo, a.screenshot)
     if a.demo:
         import pldemo
         root = pldemo.build_package(tempfile.mkdtemp(prefix="pldemo-"))
@@ -1876,7 +2159,8 @@ def main():
         devices.sort(key=lambda d: -len([f for f in os.listdir(d[1]) if f.endswith(".db")]))  # fullest first
         localcache = D.find_localcache(a.input)
         connections = C.LiveSource() if (a.this_pc or is_this_pc_package(a.input)) and os.name == "nt" else None
-    app = Viewer(devices, a.window, a.view, localcache, connections, redact=a.demo, this_pc=a.this_pc)
+    app = Viewer(devices, a.window, a.view, localcache, connections, redact=a.demo, this_pc=a.this_pc, theme=theme,
+                 settings_path=settings)
     if a.select is not None:
         app.show(app.cur_vid, select_index=a.select)
         app.on_row()
