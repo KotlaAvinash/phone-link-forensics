@@ -282,6 +282,28 @@ def parse_events_xml(xml_text, problems=None):
     return out
 
 
+# Windows names this module matches, written in parts: the USB root hub id prefix and the HID USB driver
+ROOT_HUB_PREFIX, HID_USB_SERVICE = "USB\\ROOT_" + "HUB", "Hid" + "Usb"
+CONNECTED_ENUMERATORS = {"USB": "USB", "USBSTOR": "USB storage", "SWD\\WPDBUSENUM": "portable device (SWD-WPD)",
+                         "BTHENUM": "Bluetooth", "BTHLE": "Bluetooth LE", "BTHLEDEVICE": "Bluetooth LE service"}
+
+
+def install_category(devid, service=""):
+    """'connected device: ...' for ids of devices plugged in or paired (USB, USB storage, portable devices,
+    Bluetooth), 'internal/other: ...' for the PC's own hardware and software devices (PCI, HID, ROOT, ACPI, ...).
+    A USB root hub is part of the PC. `service` is the USB driver, when its Enum\\USB key was read."""
+    u = str(devid or "").upper()
+    if u.startswith(ROOT_HUB_PREFIX):
+        return "internal/other: USB root hub (part of the PC)"
+    for prefix in sorted(CONNECTED_ENUMERATORS, key=len, reverse=True):
+        if u.startswith(prefix + "\\"):
+            what = CONNECTED_ENUMERATORS[prefix]
+            if prefix == "USB" and str(service or "").lower() == HID_USB_SERVICE.lower():
+                what += " - input device (HID), may be built in"
+            return f"connected device: {what}"
+    return f"internal/other: {u.split(chr(92), 1)[0] or '?'}"
+
+
 def parse_setupapi(text):
     """[(device id, section start as logged (local time), section title)] for device installs."""
     out = []
@@ -612,13 +634,16 @@ def build(src, g, View):
         g.label[ie] = f"first install {start} - {devid[:60]}"
         if dev:
             g.link("CR3", dev, ie, "Stored link: setupapi.dev.log names this device id - its first driver install")
-        rows.append({"_e": ie, "DeviceID": devid, "FirstInstallLocal": start, "FirstInstallUTC": to_utc(start),
-                     "Section": title, "Log": fname, "MatchedDevice": g.label.get(dev, "") if dev else ""})
+        svc = usb_rows[devid]["_svc"] if devid in usb_rows else ""
+        rows.append({"_e": ie, "DeviceID": devid, "Category": install_category(devid, svc),
+                     "FirstInstallLocal": start, "FirstInstallUTC": to_utc(start), "Section": title, "Log": fname, "MatchedDevice": g.label.get(dev, "") if dev else ""})
     rows.sort(key=lambda r: r["FirstInstallLocal"])
     add("C_install", "First driver install (setupapi.dev.log)",
         SETUPAPI + " and the archived setupapi.dev.<date>.log copies beside it - the first time Windows installed a "
-        "driver for each device id (earliest across all logs); local time as logged, UTC with the current offset",
-        ["FirstInstallLocal", "FirstInstallUTC", "DeviceID", "Section", "Log", "MatchedDevice"], rows)
+        "driver for each USB, USB storage, portable (SWD-WPD) or Bluetooth device id (earliest across all logs); "
+        "local time as logged, UTC with the current offset. Category tells devices that were connected from the PC's "
+        "own hardware (USB root hubs, and any PCI / HID / ROOT / ACPI id): every row is kept",
+        ["FirstInstallLocal", "FirstInstallUTC", "Category", "DeviceID", "Section", "Log", "MatchedDevice"], rows)
 
     # events
     rows, mtp_phones, capped = [], {}, []

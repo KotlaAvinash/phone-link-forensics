@@ -324,6 +324,32 @@ class PhysicalDevice(unittest.TestCase):
         self.assertIn("same make/model/OS \u2013 may be more than one phone", r["Evidence"])
 
 
+class InstallCategory(unittest.TestCase):
+    def test_categories(self):
+        cat = C.install_category
+        self.assertEqual(cat("USB\\VID_1234&PID_0F01\\TEST0001"), "connected device: USB")
+        self.assertEqual(cat("USBSTOR\\DISK&VEN_EXAMPLE\\TEST0001&0"), "connected device: USB storage")
+        self.assertEqual(cat("SWD\\WPDBUSENUM\\_??_EXAMPLE#TEST0001"), "connected device: portable device (SWD-WPD)")
+        self.assertEqual(cat("BTHENUM\\{0000111f-0000-1000-8000-00805f9b34fb}_X\\Y"), "connected device: Bluetooth")
+        self.assertEqual(cat("BTHLEDEVICE\\X\\Y"), "connected device: Bluetooth LE service")
+        self.assertEqual(cat(C.ROOT_HUB_PREFIX + "30\\4&1&0"), "internal/other: USB root hub (part of the PC)")
+        self.assertIn("HID", cat("USB\\VID_1234&PID_0F09\\TEST0009", C.HID_USB_SERVICE))
+        for enum in ("PCI", "HID", "ROOT", "ACPI"):
+            self.assertEqual(cat(enum + "\\EXAMPLE\\0"), "internal/other: " + enum)
+
+    def test_install_rows_have_a_category_and_are_all_kept(self):
+        ids = ["USB\\VID_1234&PID_0F01\\TEST0001", C.ROOT_HUB_PREFIX + "30\\4&1&0", "BTHENUM\\X\\Y"]
+        text = "".join(f">>>  [Device Install (Hardware initiated) - {d}]\n>>>  Section start 2030/01/01 12:00:0{i}.000\n"
+                       for i, d in enumerate(ids))
+        g = build_from(C.FakeSource({}, text))
+        v = g.views["C_install"]
+        self.assertIn("Category", v.cols)
+        self.assertEqual([(r["DeviceID"], r["Category"].split(":")[0]) for r in v.rows],
+                         [(ids[0].upper(), "connected device"), (ids[1].upper(), "internal/other"),
+                          (ids[2].upper(), "connected device")])
+        self.assertIn("Category", v.basis)
+
+
 class EventMatchedField(unittest.TestCase):
     """A Kernel-PnP event kept only because a parent / matching id is a device id is about another device."""
     PHONE = "USB\\VID_1234&PID_0F01\\TEST0001"
