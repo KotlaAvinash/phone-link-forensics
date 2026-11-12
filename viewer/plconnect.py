@@ -245,8 +245,10 @@ def decode_log(raw):
 
 
 def container_of(v):
-    """A ContainerID usable for joining devices: lower case, and empty for the PC's own NULL container."""
-    c = str(v or "").strip().lower()
+    """A ContainerID usable for joining devices: lower case, always in braces (so '{X}' and 'x' are the same
+    container), and empty for the PC's own NULL container. The one normaliser for ContainerIDs in this module."""
+    c = str(v or "").strip().strip("{}").strip().lower()
+    c = "{%s}" % c if c else ""
     return "" if c == NULL_CONTAINER else c
 
 

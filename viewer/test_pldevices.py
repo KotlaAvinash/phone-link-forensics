@@ -637,6 +637,18 @@ class TrustMatch(unittest.TestCase):
         self.assertEqual([t for rid, t, _ in g.links(("phone", "a_b_c")) if rid == "PR1"], [("trust", "t1")])
         self.assertEqual([t for rid, t, _ in g.links(("phone", "abc")) if rid == "PR1"], [])
 
+    def test_braces_and_case_do_not_hide_the_trust_link(self):
+        meta = {"DeviceMetadatas": {"HW1": [{"Metadata": {"Id": "{%s}" % G[0].upper(), "Metadata": {"DisplayName": "P1"}}}]}}
+        trust = {"TrustedClients": {"t1": {"PartnerClientId": "pre_" + G[0]},
+                                    "t2": {"PartnerClientId": "pre_{%s}" % G[0]}}}
+        with WorkFolders(), tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, meta=meta, trust=trust)
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+        phone = g.views["PC_phones"].rows[0]["_e"]
+        self.assertEqual(sorted(t for rid, t, _ in g.links(phone) if rid == "PR1"), [("trust", "t1"), ("trust", "t2")])
+
 
 class LastSeenInHistory(unittest.TestCase):
     def test_last_seen_event_is_in_the_history_with_its_utc_time(self):
@@ -707,6 +719,28 @@ class StreamedAppsWithoutAPairingFolder(unittest.TestCase):
         self.assertTrue(got["com.example.one"].startswith("pairing #1"), got)
         self.assertTrue(got["com.example.two"].startswith("NO pairing folder"), got)
         self.assertIn("NO pairing folder", v.basis)
+
+    def test_braced_device_id_is_the_same_folder(self):
+        # plparse.owns_ft_row ignores case and braces; pldevices must credit the same row to the same folder
+        apps = [("CREATE TABLE hosted_app_ids (row_id INTEGER, device_id TEXT, package_id TEXT)",
+                 [f"INSERT INTO hosted_app_ids VALUES (1, '{{{G[0].upper()}}}', 'com.example.one')"])]
+        folders = [(G[0], {"System/Database/phone.db": [("CREATE TABLE message (id INTEGER)", [])]}),
+                   ("FullTrust", {"phone_apps.db": apps})]
+        with WorkFolders(), tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, folders=folders)
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+        self.assertTrue(D.plparse.owns_ft_row("{%s}" % G[0].upper(), G[0]))
+        self.assertTrue(g.views["PC_streamed"].rows[0]["PairingFolder"].startswith("pairing #1"),
+                        g.views["PC_streamed"].rows)
+        self.assertEqual(g.views["PC_devices"].rows[0]["StreamedApps"], 1)
+        pairing = g.views["PC_devices"].rows[0]["_e"]
+        self.assertEqual(len([t for rid, t, _ in g.links(pairing) if rid == "PR2"]), 1)
+
+    def test_one_normaliser_for_ids(self):
+        self.assertEqual(D.norm_id(" {%s} " % G[0].upper()), G[0])
+        self.assertEqual(D.norm_id(None), "")
 
 
 class LinkDetection(unittest.TestCase):

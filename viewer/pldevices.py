@@ -45,6 +45,19 @@ SNAPSHOT_TRIES = 3     # copies of a file whose source keeps changing, before it
 UNSTABLE = "n/a - source changed during copy"
 
 
+def norm_id(v):
+    """A device id or GUID as compared everywhere in this module: case, surrounding spaces and braces ignored.
+    It is the engine's own normaliser (plparse.norm_guid), so pldevices and plparse credit the same rows."""
+    return plparse.norm_guid(v)
+
+
+def _partner_is(partner, mid):
+    """True when a PartnerClientId ('<prefix>_<id>') ends with '_' + this metadata Id, braced or not
+    (compared with norm_id). The id may itself contain '_', so only the end is compared."""
+    n, p = norm_id(mid), str(partner or "").strip().lower()
+    return bool(n) and (p.endswith("_" + n) or p.endswith("_{" + n + "}"))
+
+
 def find_localcache(path):
     """LocalCache folder for an input path (package root, LocalCache, Indexed or a device folder), or None."""
     p = os.path.abspath(os.path.expandvars(path))
@@ -443,7 +456,7 @@ def _build(pc, g, View, ts_seconds, iso):
                     for r in c.execute("SELECT * FROM hosted_app_ids"):
                         d = dict(zip(cols, r))
                         e = ("streamed", d.get("row_id"))
-                        dev = str(d.get("device_id") or "").lower()
+                        dev = norm_id(d.get("device_id"))
                         by_dev.setdefault(dev, []).append(e)
                         streamed.append({"_e": e, **{k: d[k] for k in cols}})
                         g.label[e] = f"streamed app {d.get('package_id')}"
@@ -529,7 +542,7 @@ def _build(pc, g, View, ts_seconds, iso):
                             f"looks like copy time: {time_notes[guid] or 'the folders as a whole - ' + copy_why}",
                             "Status": status, "Databases": ", ".join(dbs), "DataRows": rows,
                             "FirstActivityUTC": iso(first), "LastActivityUTC": iso(last), "SIM": sim,
-                            "StreamedApps": len(by_dev.get(guid.lower(), [])), "Detail": "; ".join(details)})
+                            "StreamedApps": len(by_dev.get(norm_id(guid), [])), "Detail": "; ".join(details)})
     add("PC_devices", "Phone pairings (device folders)",
         "".join(w + ". " for w in pc.warnings + ([copy_warn] if copy_warn else [])) +
         f"one folder per pairing under LocalCache\\Indexed, numbered in order of creation. FolderCreatedUTC = "
@@ -565,8 +578,7 @@ def _build(pc, g, View, ts_seconds, iso):
                                    "SelfClientID": t.get("SelfClientId"),
                                    "DcgClientID": (t.get("Attributes") or {}).get("dcg_prod_client_id")})
                 # PartnerClientId is stored as '<prefix>_<id>'; it must end with '_' + the phone's metadata Id
-                partner = str(t.get("PartnerClientId") or "").lower()
-                hit = next((pe for mid, pe in mids.items() if mid and partner.endswith("_" + str(mid).lower())), None)
+                hit = next((pe for mid, pe in mids.items() if _partner_is(t.get("PartnerClientId"), mid)), None)
                 if hit:
                     g.link("PR1", hit, e, "Stored link: this trust relationship's partner ID contains the phone's "
                                           "metadata ID")
@@ -585,9 +597,9 @@ def _build(pc, g, View, ts_seconds, iso):
         add("PC_streamed", "Apps streamed to this PC, per device (FullTrust phone_apps.db)", streamed_err, ["Error"],
             [{"Error": streamed_err}])
     else:
-        folder_of = {r["DeviceFolder"].lower(): r for r in folder_rows}
+        folder_of = {norm_id(r["DeviceFolder"]): r for r in folder_rows}
         for s in streamed:
-            f = folder_of.get(str(s.get("device_id") or "").lower())
+            f = folder_of.get(norm_id(s.get("device_id")))
             s["PairingFolder"] = (f"pairing #{f['#']} - folder {f['DeviceFolder']}" if f else
                                   "NO pairing folder with this GUID (the folder is gone, or the id is not a folder)")
         add("PC_streamed", "Apps streamed to this PC, per device (FullTrust phone_apps.db)",
@@ -595,7 +607,7 @@ def _build(pc, g, View, ts_seconds, iso):
             "PairingFolder names that folder, or says NO pairing folder when no folder under Indexed has that GUID",
             list(streamed[0].keys())[1:] if streamed else ["device_id"], streamed)
     for r in folder_rows:
-        for se in by_dev.get(r["DeviceFolder"].lower(), []):
+        for se in by_dev.get(norm_id(r["DeviceFolder"]), []):
             g.link("PR2", r["_e"], se, "Stored link: hosted_app_ids.device_id is this pairing folder's name")
 
     # ---------- relations

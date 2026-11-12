@@ -288,6 +288,13 @@ class NullContainer(unittest.TestCase):
             (C.WPD, None, ["ROOT_ENUM"]),
             (C.WPD + r"\ROOT_ENUM", {"FriendlyName": "Some volume", "ContainerID": self.NULL}, []))
 
+    def test_container_ids_compare_without_case_or_braces(self):
+        cid = "{e5e5e5e5-0000-4000-a000-000000000001}"
+        for said in (cid, cid.upper(), cid.strip("{}"), " " + cid.strip("{}").upper() + " "):
+            self.assertEqual(C.container_of(said), cid, said)
+        self.assertEqual(C.container_of(self.NULL.strip("{}").upper()), "")
+        self.assertEqual(C.container_of(None), "")
+
     def test_null_container_never_joins_or_flags_a_phone(self):
         g = build_from(C.FakeSource(self.keys()))
         self.assertEqual(g.views["CR1"].rows, [])
