@@ -305,6 +305,10 @@ def stage(src_dir, work, acq, names=DB_NAMES):
 
     The -shm never gets a source hash, stable or not: it is a shared-memory index that a running Phone Link
     rewrites constantly, so the source can differ from the copy a moment later. Its row carries copy_shm_sha256 only.
+
+    Every copy is re-hashed after it is taken: copy_sha256 (and copy_wal_sha256 for a stable set) are the hashes
+    of the copy, and copy_matches says "yes" when they equal the source hashes, "NO - ..." when they do not (see
+    copy_mismatch_warnings), or "n/a - source changed during copy" for an unstable set.
     """
     os.makedirs(work, exist_ok=True)
     staged = {}
@@ -330,9 +334,12 @@ def stage(src_dir, work, acq, names=DB_NAMES):
                "sha256": before[0] if stable else "",
                "wal": "", "shm": "", "wal_sha256": "", "shm_sha256": "",
                "source_stable": "yes" if stable else UNSTABLE}
-        if not stable:
-            # No source hash settled, so none is claimed. The copy's own hash is kept under its own name.
-            row["copy_sha256"] = sha256(dst)
+        # The copy is hashed in its own right. Unstable: no source hash settled, so none is claimed and the copy's
+        # hash is kept under its own name. Stable: the copy must equal the source hash taken around the copy.
+        row["copy_sha256"] = sha256(dst)
+        bad = []
+        if stable and row["copy_sha256"] != before[0]:
+            bad.append(name)
         for suf in ("-wal", "-shm"):
             if os.path.isfile(dst + suf):
                 k = suf[1:]
@@ -342,14 +349,31 @@ def stage(src_dir, work, acq, names=DB_NAMES):
                     row["copy_" + k + "_sha256"] = sha256(dst + suf)
                 elif suf == "-wal":
                     row[k + "_sha256"] = before[1]
+                    row["copy_wal_sha256"] = sha256(dst + suf)
+                    if row["copy_wal_sha256"] != before[1]:
+                        bad.append(name + suf)
                 else:
                     # The -shm is a shared-memory index the running app rewrites constantly, so a hash of the source
                     # taken now need not be the bytes that were copied. Only the copy's own hash is recorded, and
                     # the -shm is not verified against the source (the .db and -wal are).
                     row["copy_" + k + "_sha256"] = sha256(dst + suf)
+        if not stable:
+            row["copy_matches"] = "n/a - source changed during copy"
+        elif bad:
+            row["copy_matches"] = "NO - " + ", ".join(bad) + " copy does not match the source hash"
+        else:
+            row["copy_matches"] = "yes"
         acq.append(row)
         staged[name] = dst
     return staged
+
+
+def copy_mismatch_warnings(acq):
+    """One warning per staged file whose copy does not match the source hash taken around the copy."""
+    return ["Staged copy of %s does not match its source hash (source %s, copy %s): the copy is not a faithful "
+            "image of the evidence - re-acquire before relying on its results."
+            % (r.get("file"), (r.get("sha256") or "")[:16], (r.get("copy_sha256") or "")[:16])
+            for r in acq if str(r.get("copy_matches", "")).startswith("NO")]
 
 
 def deleted_evidence(path, dbname):
@@ -1117,6 +1141,7 @@ def run(a, pkg_work):
         for r in ft_acq:
             r.update({"file": "FullTrust/" + FULLTRUST_DB, "source": ft_src})
         pkg_acq.extend(ft_acq)
+        pkg_warnings.extend(copy_mismatch_warnings(ft_acq))
     if ft_work:
         if a.carve and plcarve is not None:
             try:
@@ -1146,6 +1171,7 @@ def run(a, pkg_work):
             if not dbs:
                 print("[%s] no databases — skipped" % label)
                 continue
+            warnings.extend(copy_mismatch_warnings(acq))
             if ft_src and not is_guid(label):
                 warnings.append("Device label %r is not a pairing-folder GUID, so no row of the package-wide "
                                 "FullTrust %s (live or carved) is attributed to it. Rows that cannot be "

@@ -117,7 +117,8 @@ class SnapshotStability(unittest.TestCase):
         try:
             row = [a for a in ev.acq if a["file"] == "phone.db"][0]
             self.assertEqual(row["sha256"], P.sha256(os.path.join(self.src, "phone.db")))
-            self.assertNotIn("copy_sha256", row)
+            self.assertEqual(row["copy_sha256"], row["sha256"])        # both recorded; the copy was re-hashed
+            self.assertEqual(row["copy_matches"], "yes")
             for v in ev.verify:
                 self.assertEqual(v["copy_matches"], "yes")
                 self.assertTrue(v["source_sha256"])
@@ -144,6 +145,57 @@ class SnapshotStability(unittest.TestCase):
             self.assertEqual(len(vals), 6)
         finally:
             ev.close()
+
+
+class StagedCopyHash(unittest.TestCase):
+    """plparse's own staging (the CLI) re-hashes the copy it took and compares it with the source hash."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = os.path.join(self.tmp.name, "device")
+        self.w = wal_source(self.src)
+        self.real_copy = shutil.copy2
+
+    def tearDown(self):
+        shutil.copy2 = self.real_copy
+        self.w.close()
+        self.tmp.cleanup()
+
+    def test_good_copy_records_both_hashes_and_matches(self):
+        acq = []
+        P.stage(self.src, os.path.join(self.tmp.name, "work"), acq)
+        row = [r for r in acq if r["file"] == "phone.db"][0]
+        self.assertEqual(row["source_stable"], "yes")
+        self.assertEqual(row["copy_sha256"], row["sha256"])
+        self.assertEqual(row["copy_wal_sha256"], row["wal_sha256"])
+        self.assertEqual(row["copy_matches"], "yes")
+
+    def corrupt_copies(self):
+        def copy2(s, d, *a, **k):
+            r = self.real_copy(s, d, *a, **k)
+            if os.path.basename(d) == "phone.db":
+                with open(d, "r+b") as fh:           # the copy differs from the source, the source is untouched
+                    fh.seek(200)
+                    fh.write(b"\xAA")
+            return r
+        shutil.copy2 = copy2
+
+    def test_copy_that_differs_from_its_source_is_flagged(self):
+        self.corrupt_copies()
+        acq = []
+        P.stage(self.src, os.path.join(self.tmp.name, "work"), acq)
+        row = [r for r in acq if r["file"] == "phone.db"][0]
+        self.assertEqual(row["source_stable"], "yes")
+        self.assertNotEqual(row["copy_sha256"], row["sha256"])
+        self.assertEqual(row["sha256"], P.sha256(os.path.join(self.src, "phone.db")))
+        self.assertTrue(row["copy_matches"].startswith("NO"), row)
+
+    def test_cli_warns_about_a_copy_that_does_not_match(self):
+        self.corrupt_copies()
+        out = os.path.join(self.tmp.name, "out")
+        run_main(["--input", self.src, "--out", out])
+        w = read_acq(out, "device")["warnings"]
+        self.assertTrue([x for x in w if "phone.db" in x and "does not match" in x], w)
 
 
 class ChangingShm(unittest.TestCase):
