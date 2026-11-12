@@ -840,9 +840,10 @@ class FilterParseTest(unittest.TestCase):
         from datetime import datetime
         want = datetime(2030, 9, 22, 11, 22, 12)
         for text in ("2030-09-22 11:22:12", "2030-09-22T11:22:12", "2030-09-22T11:22:12Z", "2030-09-22 11:22:12Z",
-                     "2030-09-22T11:22:12+05:30", "2030-09-22 11:22:12 (no zone)", "2030-09-22T11:22:12-0700",
+                     "2030-09-22T11:22:12+05:30", "2030-09-22T11:22:12-0700", "2030-09-22 11:22:12 (UTC)",
                      " 2030-09-22 11:22:12 "):
             self.assertEqual(F.parse_time(text), want, text)     # as written: the offset is not applied
+        self.assertIsNone(F.parse_time("2030-09-22 11:22:12 (no zone)"))    # no zone: undated
         self.assertEqual(F.parse_time("2030-09-22 11:22:12.123"), datetime(2030, 9, 22, 11, 22, 12, 123000))
         self.assertEqual(F.parse_time("2030-09-22T11:22:12.1234567Z"), datetime(2030, 9, 22, 11, 22, 12, 123456))
         self.assertEqual(F.parse_time("2030-09-22"), datetime(2030, 9, 22))
@@ -898,9 +899,10 @@ class FilterSortTest(unittest.TestCase):
     def test_numbers_numerically_and_dates_chronologically(self):
         self.assertEqual(self.order(["10", "9", "1,000", "-1", "2.5"], F.NUMBER), ["-1", "2.5", "9", "10", "1,000"])
         dates = ["2030-09-22 11:22:12", "2030-01-02 03:04:05 (no zone)", "2030-09-22T11:22:12.5Z", "2029-12-31"]
-        self.assertEqual(self.order(dates, F.DATE),
-                         ["2029-12-31", "2030-01-02 03:04:05 (no zone)", "2030-09-22 11:22:12", "2030-09-22T11:22:12.5Z"])
+        self.assertEqual(self.order(dates, F.DATE),      # a time without a zone cannot be ordered: after the others
+                         ["2029-12-31", "2030-09-22 11:22:12", "2030-09-22T11:22:12.5Z", "2030-01-02 03:04:05 (no zone)"])
         self.assertEqual(self.order(dates, F.DATE, True)[0], "2030-09-22T11:22:12.5Z")
+        self.assertEqual(self.order(dates, F.DATE, True)[-1], "2030-01-02 03:04:05 (no zone)")   # also last
 
     def test_odd_cells_sort_after_typed_ones_but_before_blanks(self):
         self.assertEqual(self.order(["x", 5, None, 1], F.NUMBER), [1, 5, "x", None])
@@ -2340,6 +2342,43 @@ class ViewerReview3Test(unittest.TestCase):
             app.export()
         with open(out + ".filter.txt", encoding="utf-8-sig") as fh:
             self.assertIn("(blanks kept)", fh.read())
+
+    # ---- 7 times without a zone are undated
+    def test_zoneless_times_are_undated_for_sort_conditions_and_range(self):
+        nz = "2030-01-01 13:30:00 (no zone)"
+        self.assertIsNone(F.parse_time(nz))
+        self.assertTrue(F.is_zoneless(nz))
+        self.assertFalse(F.is_zoneless("2030-01-01 13:30:00"))
+        self.assertEqual(F.detect_type([nz] * 3, "TimeUTC"), F.DATE)        # still a date column
+        rows = [{"c": v} for v in (nz, "2030-01-02 00:00:00", None, "2029-01-01 00:00:00")]
+        order = [rows[i]["c"] for i in F.sort_indices(range(4), rows, "c", F.DATE)]
+        self.assertEqual(order, ["2029-01-01 00:00:00", "2030-01-02 00:00:00", nz, None])    # after the times with a zone
+        self.assertIsNone(F.make_condition(F.DATE, "on", "2030-01-01").test(nz))
+        self.assertEqual(F.value_key(nz, F.DATE), nz)                       # listed as it is, not under a day
+        self.assertEqual(F.newest([nz, "2029-01-01"]).year, 2029)
+        app = self.app
+        app.g.add_view(V.R.View("X_nz", "zone-less synthetic", "table", "synthetic", ["ID", "TimeUTC"],
+                                [{"ID": 1, "TimeUTC": "2030-01-01 13:00:00"}, {"ID": 2, "TimeUTC": nz},
+                                 {"ID": 3, "TimeUTC": "2030-01-05 00:00:00"}]))
+        app.fill_nav()
+        app.show("X_nz")
+        app.range_from.set("2030-01-01")
+        app.range_to.set("2030-01-01")
+        app.apply_range()
+        ids = lambda: [app.g.views["X_nz"].rows[i]["ID"] for i in app.cur_rows]
+        self.assertEqual(ids(), [1, 2])          # undated rows kept, as "Keep undated rows" says
+        self.assertIn("no zone", app.filter_lbl.cget("text"))
+        self.assertIn("undated", app.filter_lbl.cget("text"))
+        app.range_keep.set(False)
+        app.apply_range()
+        self.assertEqual(ids(), [1])
+        app.clear_range()
+        app.set_sort("TimeUTC", False)
+        self.assertEqual(ids(), [1, 3, 2])
+        self.assertIn(nz, app.table.item("1", "values"))                   # the raw value stays visible
+        self.assertIn("no zone", V.HINTS["range"])
+        p = app.open_filter("TimeUTC")
+        self.assertIn("no zone", p.zoneless_lbl.cget("text"))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ for display. A cell is blank when it is None or empty; blanks always sort last a
 only by unticking "(Blanks)".
 
     detect_type(values, name)            -> TEXT | NUMBER | DATE
+    parse_time(v), is_zoneless(v)        -> a time AS WRITTEN; '(no zone)' times are undated
     sort_indices(idx, rows, col, type, descending)
     make_condition(type, op, a, b)       -> Condition (raises FilterError with a message for the examiner)
     ColumnFilter(type, values, blanks, cond).match(value) / .describe(col)
@@ -114,11 +115,23 @@ def _time_parts(v):
     return dt, unit
 
 
+_NO_ZONE = re.compile(r"\(\s*no zone\s*\)\s*$", re.IGNORECASE)
+
+
+def is_zoneless(v):
+    """True for a time written with the note '(no zone)': its zone is unknown, so it cannot be put in time order
+    with the column's other times (the data engine lists these last for the same reason)."""
+    return isinstance(v, str) and bool(_NO_ZONE.search(v)) and _time_parts(v)[0] is not None
+
+
 def parse_time(v):
     """A datetime from a time cell, AS WRITTEN: 'YYYY-MM-DD[ HH:MM[:SS[.fff]]]', a T separator, a trailing Z, UTC
-    or +hh:mm offset, and a note in brackets such as '(no zone)'. The offset is NOT applied: a column holds one
-    zone (its name says which), and the examiner compares what the cell shows. None when it is not a time."""
-    return _time_parts(v)[0]
+    or +hh:mm offset, and a note in brackets. The offset is NOT applied: a column holds one zone (its name says
+    which), and the examiner compares what the cell shows. None when it is not a time - and for a time marked
+    '(no zone)' (is_zoneless): such a cell is UNDATED, sorted after the cells with a date, never decided by a date
+    condition or the case-wide dates, kept or removed with the blanks; its raw value is shown as it is."""
+    dt = _time_parts(v)[0]
+    return None if dt is not None and _NO_ZONE.search(v) else dt
 
 
 def parse_when(text):
@@ -139,7 +152,7 @@ def detect_type(values, name=""):
     named = bool(TIME_NAME.search(name or ""))
     if not vals:
         return DATE if named else TEXT
-    times = sum(parse_time(v) is not None for v in vals)
+    times = sum(parse_time(v) is not None or is_zoneless(v) for v in vals)
     if times >= 0.9 * len(vals) or (named and times >= 0.5 * len(vals)):
         return DATE
     if sum(parse_number(v) is not None for v in vals) >= 0.9 * len(vals):
@@ -181,13 +194,20 @@ def sort_key(v, ctype):
 
 
 def sort_indices(indices, rows, col, ctype, descending=False):
-    """Row indices sorted on col by type; stable; blanks last in BOTH directions (in their existing order)."""
+    """Row indices sorted on col by type; stable; blanks last in BOTH directions (in their existing order), and
+    before them the cells that are not of the column's type."""
     filled, blank = [], []
     for i in indices:
         (blank if is_blank(rows[i].get(col)) else filled).append(i)
     if ctype == DATE or ctype == NUMBER:
+        # cells not of the column's type (undated times, '(no zone)' times, text in a number column) come after
+        # the typed ones in BOTH directions, like the blanks
         keys = {i: sort_key(rows[i].get(col), ctype) for i in filled}
-        filled.sort(key=keys.__getitem__, reverse=descending)
+        typed = [i for i in filled if keys[i][0] == 0]
+        odd = [i for i in filled if keys[i][0] != 0]
+        typed.sort(key=keys.__getitem__, reverse=descending)
+        odd.sort(key=keys.__getitem__, reverse=descending)
+        filled = typed + odd
     else:
         filled.sort(key=lambda i: natural_key(cell_text(rows[i].get(col))), reverse=descending)
     return filled + blank

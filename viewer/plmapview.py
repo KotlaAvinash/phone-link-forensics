@@ -242,7 +242,9 @@ HINTS = {
              "and times. These are inferences, not stored links. With it off, the timeline and “People” views "
              "are hidden too.",
     "range": "Applies to every view's main time column (pick it under “Filter on”). Dates as YYYY-MM-DD or "
-             "YYYY-MM-DD HH:MM[:SS]; To is inclusive. Quick ranges end at the NEWEST time in the case, not now.",
+             "YYYY-MM-DD HH:MM[:SS]; To is inclusive. Quick ranges end at the NEWEST time in the case, not now. "
+             "Times marked (no zone) cannot be put in time order with the others: they count as undated (kept "
+             "or removed with “Keep undated rows”) and sort after the times that have a zone.",
     "theme": "Light, dark, or follow the Windows app colour (checked every 5 seconds). Ctrl+Shift+L switches. "
              "The choice is remembered for next time (not in --demo or --screenshot runs).",
 }
@@ -396,6 +398,7 @@ class Viewer(tk.Tk):
         self.range_filter = None  # the case-wide date range (a plfilter.ColumnFilter), or None
         self.range_cols = {}      # view -> the time column the case-wide range filters on, when not the default
         self._types = {}          # (view, column) -> (View, detected type)
+        self._zoneless = {}       # (view, column) -> (View, number of '(no zone)' times)
         self._typing = False      # True while a keystroke in the filter box is being handled (debounced)
         self._filter_job = None
         self.filter_note = ""     # a one-off note for the filter line (a jump that cleared filters)
@@ -1220,9 +1223,27 @@ class Viewer(tk.Tk):
         if st["sort"] and st["sort"][0] in v.cols:
             col, desc = st["sort"]
             text += f"   |   sorted by {col}, {sort_words(self.col_type(col), desc)} (blanks last)"
+        zl = [(c, n) for c in dict.fromkeys(c for c, f in self._range_checks(self.cur_vid) + list(st["filters"].items())
+                                             if f is not None and f.active and f.ctype == F.DATE)
+              for n in [self.zoneless(c)] if n]
+        if zl:
+            text += "   |   " + ", ".join(f"{n:,} time{'' if n == 1 else 's'} in {c}" for c, n in zl) +                 " marked (no zone) count as undated"
         if self.filter_note:
             text += f"   |   {self.filter_note}"
         self.filter_lbl.config(text=text)
+
+    def zoneless(self, col, vid=None):
+        """How many cells of a column are times marked '(no zone)' (undated for sorting and filtering)."""
+        vid = vid or self.cur_vid
+        v = self.g.views[vid]
+        if col not in v.cols:
+            return 0
+        hit = self._zoneless.get((vid, col))
+        if hit is not None and hit[0] is v:
+            return hit[1]
+        n = sum(1 for r in v.rows if F.is_zoneless(r.get(col)))
+        self._zoneless[(vid, col)] = (v, n)
+        return n
 
     def set_sort(self, col, descending):
         if self.g is None or self.cur_vid not in self.g.views:
@@ -1462,7 +1483,8 @@ class Viewer(tk.Tk):
         lines += [f"  {f.describe(c)}" for c, f in st["filters"].items() if f.active] or ["  none"]
         lines += [f"Text search (all columns, case-insensitive): " + (f"'{F.visible(text)}'" if text else "none"), "",
                   "All filters combine with AND. Blank cells (and, for a date condition, cells that are not times) "
-                  "are kept unless (Blanks) was unticked: see 'blanks kept' / 'blanks removed' above.",
+                  "are kept unless (Blanks) was unticked: see 'blanks kept' / 'blanks removed' above. A time "
+                  "marked (no zone) counts as undated: it cannot be put in time order with the others.",
                   "Cells are written as stored: invisible characters are not marked in the CSV. Excel-safe: a cell "
                   "that starts with = + - @ (or a tab or line break) gets a leading ' unless it is a plain number; "
                   "bytes are written as <N bytes>."]
@@ -1773,9 +1795,17 @@ class FilterPanel(tk.Frame):
         self.b_entry = tk.Entry(box, textvariable=self.b_var, width=19)
         self.b_entry.grid(row=1, column=3, sticky="w", pady=(4, 0))
         self.preset_btns = []
+        self.zoneless = sum(1 for x in values if F.is_zoneless(x)) if ctype == F.DATE else 0
+        self.zoneless_lbl = role(tk.Label(box, text="", font=small, anchor="w", justify="left",
+                                          wraplength=app.px(330)), **muted)
         if ctype == F.DATE:
             role(tk.Label(box, text=f"Dates: {F.DATE_HELP}; To is inclusive", font=small),
                  **muted).grid(row=2, column=0, columnspan=4, sticky="w")
+            if self.zoneless:
+                self.zoneless_lbl.config(text=f"{self.zoneless:,} time{'' if self.zoneless == 1 else 's'} marked "
+                                              f"(no zone): undated - listed after the dates, kept or removed with "
+                                              f"the blanks")
+                self.zoneless_lbl.grid(row=4, column=0, columnspan=4, sticky="w")
             quick = tk.Frame(box)
             quick.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
             role(tk.Label(quick, text="Newest in column, back:", font=small), **muted).pack(side="left")
