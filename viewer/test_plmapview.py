@@ -1878,10 +1878,12 @@ class TitleBarTest(unittest.TestCase):
         self.assertFalse(T.set_title_bar(self.Win(), True, api=api, os_name="posix"))
         self.assertEqual(api.mock_calls, [])
 
-    def test_dpi_awareness_per_monitor_with_fallback(self):
+    def test_dpi_awareness_is_system_aware_with_fallback(self):
+        # system DPI awareness (1), as IDLE uses: Tk does not handle WM_DPICHANGED, so per-monitor awareness (2)
+        # would leave fonts and row heights at the first monitor's size on a monitor with another scaling
         api = mock.Mock()
-        self.assertEqual(T.dpi_aware(api=api, os_name="nt"), 2)
-        api.shcore.SetProcessDpiAwareness.assert_called_once_with(2)
+        self.assertEqual(T.dpi_aware(api=api, os_name="nt"), 1)
+        api.shcore.SetProcessDpiAwareness.assert_called_once_with(1)
         api = mock.Mock()
         api.shcore.SetProcessDpiAwareness.side_effect = OSError
         self.assertEqual(T.dpi_aware(api=api, os_name="nt"), 1)

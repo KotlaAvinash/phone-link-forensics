@@ -355,7 +355,7 @@ def write_csv_atomic(path, header, rows):
 
 
 def _dpi_aware():
-    """Crisp text on scaled Windows displays, and window coordinates that match the screen (per monitor)."""
+    """Crisp text on scaled Windows displays, and window coordinates that match the screen (system DPI aware)."""
     T.dpi_aware()
 
 

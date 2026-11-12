@@ -37,7 +37,8 @@ px(root, n)         n pixels at 96 DPI, in this display's pixels. row_height(roo
 fit_text(text, measure, width)
                     text cut at the end with an ellipsis so that measure(result) <= width.
 dpi_aware(api=None, os_name=None)
-                    per-monitor DPI awareness (returns 2), else system-aware (1), else None. Off Windows: None.
+                    system DPI awareness (returns 1; not per-monitor: Tk does not handle a DPI change), else
+                    None. Off Windows: None.
 set_title_bar(window, dark, api=None, os_name=None)
                     a dark or light Windows title bar (DWMWA_USE_IMMERSIVE_DARK_MODE 20, then 19 for older
                     Windows 10), then a frame refresh. Failures are ignored (False); nothing happens off Windows.
@@ -275,7 +276,10 @@ def fit_text(text, measure, width):
 
 # ---------------------------------------------------------------- Windows: DPI and the title bar
 def dpi_aware(api=None, os_name=None):
-    """Crisp text on scaled displays: per-monitor DPI awareness, falling back to system awareness."""
+    """Crisp text on scaled displays: SYSTEM DPI awareness (1), as IDLE does, falling back to the older call
+    (also system aware). Not per-monitor (2): Tk does not handle WM_DPICHANGED, so on a second monitor with
+    another scaling the fonts and row heights would keep the first monitor's size; system aware, Windows scales
+    the whole window there instead (slightly soft, but every size stays right)."""
     if (os_name or os.name) != "nt":
         return None
     if api is None:
@@ -285,8 +289,8 @@ def dpi_aware(api=None, os_name=None):
         except (ImportError, AttributeError):
             return None
     try:
-        api.shcore.SetProcessDpiAwareness(2)      # PROCESS_PER_MONITOR_DPI_AWARE
-        return 2
+        api.shcore.SetProcessDpiAwareness(1)      # PROCESS_SYSTEM_DPI_AWARE
+        return 1
     except (AttributeError, OSError):
         pass
     try:
