@@ -633,20 +633,23 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         ["ContactID", "Contact", "DeletedFrom", "DeletedRowID"], rows)
 
     # R03 thread -> messages, R04 thread -> participants
+    sms_threads = {t["ThreadID"] for t in thread_rows}
     rows = []
     for m in sms_rows:
         g.link("R03", _ent("thread", m["ThreadID"]), m["_e"])
-        rows.append({"ThreadID": m["ThreadID"], "MessageID": m["MessageID"], "TimeUTC": m["TimeUTC"], "Type": m["Type"],
+        rows.append({"ThreadID": m["ThreadID"], "ThreadFound": "yes" if m["ThreadID"] in sms_threads else "no",
+                     "MessageID": m["MessageID"], "TimeUTC": m["TimeUTC"], "Type": m["Type"],
                      "Address": m["Address"]})
     rel("R03", "SMS thread -> messages", "id-join", "message.thread_id = conversation.thread_id (phone.db)",
-        ["ThreadID", "MessageID", "TimeUTC", "Type", "Address"], rows)
+        ["ThreadID", "ThreadFound", "MessageID", "TimeUTC", "Type", "Address"], rows)
     rows = []
     for p in part_rows:
         g.link("R04", _ent("thread", p["ThreadID"]), p["_e"])
-        rows.append({"ThreadID": p["ThreadID"], "ParticipantID": p["ParticipantID"], "Address": p["Address"],
+        rows.append({"ThreadID": p["ThreadID"], "ThreadFound": "yes" if p["ThreadID"] in sms_threads else "no",
+                     "ParticipantID": p["ParticipantID"], "Address": p["Address"],
                      "ContactName": p["ContactName"]})
     rel("R04", "SMS thread -> participants", "id-join", "participant.thread_id = conversation.thread_id (phone.db)",
-        ["ThreadID", "ParticipantID", "Address", "ContactName"], rows)
+        ["ThreadID", "ThreadFound", "ParticipantID", "Address", "ContactName"], rows)
 
     # R05 thread -> MMS -> parts
     rows = []
@@ -663,6 +666,7 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         ["ThreadID", "MMSID", "PartID", "ContentType", "Name", "Size"], rows)
 
     # R06 RCS thread -> chats / file transfers
+    rcs_threads = {r["thread_id"] for r in rcs}
     rows = []
     for table, what in (("rcs_chat", "RCS chat"), ("rcs_filetransfer", "RCS file transfer")):
         for r in T("phone.db", table, ("thread_id", "message_id", "from_address", "timestamp")):
@@ -672,14 +676,15 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
                 g.time[e] = ts_seconds(r["timestamp"])
                 g.label[e] = f"{what} {r['from_address'] or ''}".strip()
                 g.home.setdefault(e, ("R06", len(rows)))
-            rows.append({"_e": e, "RCSThreadID": r["thread_id"], "Table": table, "MessageID": r["message_id"],
+            rows.append({"_e": e, "RCSThreadID": r["thread_id"],
+                         "RCSThreadFound": "yes" if r["thread_id"] in rcs_threads else "no",
+                         "Table": table, "MessageID": r["message_id"],
                          "From": r["from_address"], "TimeUTC": iso(ts_seconds(r["timestamp"]))})
     rel("R06", "RCS thread -> chats and file transfers", "id-join",
         "rcs_chat / rcs_filetransfer.thread_id = rcs_conversation.thread_id (phone.db)",
-        ["RCSThreadID", "Table", "MessageID", "From", "TimeUTC"], rows)
+        ["RCSThreadID", "RCSThreadFound", "Table", "MessageID", "From", "TimeUTC"], rows)
 
     # R07 RCS thread -> SMS fallback thread
-    sms_threads = {t["ThreadID"] for t in thread_rows}
     rows = []
     for r in rcs:
         found = r["fallback_id"] in sms_threads
@@ -967,6 +972,15 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         " feed table's row count now, for reference",
         ["Database", "Feed", "Table", "Sequence", "Expected", "RowsPresent", "Status"], rows)
     g.views["R25"].problems = sum(1 for r in rows if r["Status"] == "differs")
+
+    # ---------- how many rows found their partner (relation views that also list rows without one)
+    for rid in g.relations:
+        v = g.views[rid]
+        found = [c for c in v.cols if c.endswith("Found")]
+        if v.matched is None and found:
+            v.matched = sum(1 for r in v.rows if r.get(found[0]) == "yes")
+        elif v.matched is None and "Candidates" in v.cols:     # examiner's joins: matched = at least one contact
+            v.matched = sum(1 for r in v.rows if (whole(r.get("Candidates")) or 0) > 0)
 
     # ---------- database + scope of every view
     DBOF = {"E_contacts": "contacts.db", "E_calls": "calling.db", "E_threads": "phone.db", "E_sms": "phone.db",

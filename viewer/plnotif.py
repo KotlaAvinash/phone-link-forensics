@@ -387,10 +387,12 @@ def build(ev, g, View, ts_seconds, iso):
         for name, ok in checks:
             rel.append({"_e": r["_e"], "Row": g.label[r["_e"]], "Check": name,
                         "Result": "agrees" if ok else "DISAGREES"})
-    vids.append(add("NR4", "Columns vs packed JSON - consistency checks", "in-table",
+    vids.append(add("NR4", "Columns vs packed JSON - consistency checks", "check",
                     "each row's plain columns compared with its own json, and json fields with each other "
                     "(flags decoded [published]); a disagreement is worth explaining", ["Row", "Check", "Result"],
                     rel, entity=False))
+    # a problem is a check that did not agree (DISAGREES, or json that could not be read); "not checked" is not one
+    g.views["NR4"].problems = sum(1 for x in rel if x["Result"] != "agrees" and not x["Result"].startswith("not checked"))
     vids.append(add("NR5", "Notification -> its chat messages", "in-table",
                     "messages[i] was sent by senderNames[i] inside the same json", ["Notification", "Position",
                                                                                      "Sender", "Message"],
@@ -417,6 +419,7 @@ def build(ev, g, View, ts_seconds, iso):
                                                                                                   "Source",
                                                                                                   "Notification"],
                     rel, entity=False))
+    g.views["ND1"].matched = sum(1 for x in rel if not x["Notification"].startswith("(no notification row"))
     rel = []
     keys = {}   # json key -> every row with it (a live row and its deleted earlier versions share one key)
     for r in rows:

@@ -170,6 +170,27 @@ class Demo(unittest.TestCase):
         self.assertIn("not documented by Microsoft", v.basis)
         self.assertEqual(v.cols[3:5], ["Sequence", "Expected"])                 # the stored column names, as is
 
+    # ---- counts for the viewer (interface: View.problems / View.matched)
+    def test_every_check_view_counts_its_problems(self):
+        checks = {vid for vid, v in self.g.views.items() if v.kind == "check"}
+        self.assertTrue({"R23", "R25", "NR4"} <= checks, checks)
+        for vid in checks:
+            self.assertIsNotNone(self.g.views[vid].problems, vid)
+        nr4 = self.g.views["NR4"]
+        self.assertEqual(nr4.problems, sum(1 for r in nr4.rows if r["Result"] != "agrees"))
+        self.assertGreater(nr4.problems, 0)
+        self.assertIsNone(self.g.views["E_calls"].problems)
+
+    def test_relations_count_rows_that_found_their_partner(self):
+        want = {"R03": 2, "R04": 3, "R06": 1, "R07": 1, "R10": 2, "R11": 2, "R13": 4, "R14": 4, "ND1": 1}
+        got = {vid: self.g.views[vid].matched for vid in want}
+        self.assertEqual(got, want)
+        self.assertEqual(len(self.view("R04")), 4)
+        self.assertEqual({r["ParticipantID"]: r["ThreadFound"] for r in self.view("R04")},
+                         {1: "yes", 2: "yes", 3: "yes", 4: "no"})
+        self.assertIsNone(self.g.views["E_calls"].matched)
+        self.assertIsNone(self.g.views["R22"].matched)
+
     # ---- navigation
     def test_links_from_one_call(self):
         rids = {rid for rid, _, _ in self.g.links(("call", 1))}
