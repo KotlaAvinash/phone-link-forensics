@@ -631,12 +631,18 @@ def _live_json(db_path, errors):
             c.close()
 
 
-def _region_of(buf, ps, pno, fl, off, hdr_offset=None):
-    """Dead-space kind holding byte offset off of page pno, or 'cell-area' when it is in none."""
-    for kind, start, ln in page_regions(buf, ps, pno, fl, hdr_offset):
+def _json_place(page, off, hdr, free):
+    """Where a json object at offset off of one page image lies: the dead-space kind (free-page, freeblock,
+    page-slack), 'not-a-btree-page' (an overflow or freelist page, whose bytes no cell pointer describes), or None
+    when it is in the cell area of a b-tree page - inside a cell, which belongs to the record path."""
+    if free:
+        return "free-page"
+    for kind, start, ln in page_regions(page, len(page), 1, set(), hdr):
         if start <= off < start + ln:
             return kind
-    return "cell-area"
+    if hdr >= len(page) or page[hdr] not in (0x02, 0x05, 0x0A, 0x0D):
+        return "not-a-btree-page"
+    return None
 
 
 def _ms_utc(v):
@@ -651,11 +657,18 @@ def _ms_utc(v):
         return ""
 
 
-def carve_notification_json(db_path, data, ps, fl, include_wal, carved, errors):
+def carve_notification_json(db_path, data, ps, fl, include_wal, carved, errors, stats=None):
     """Schema-specific pass for notifications.db (+ -wal): notification json whose record header was overwritten.
 
     Scans every page of the file and every WAL frame for complete json objects, and keeps those not already
-    present as a live row or as a record the record carver recovered (same key + id + postTime), each once."""
+    present as a live row or as a record the record carver recovered (same key + id + postTime), each once.
+    Only objects in DEAD SPACE are reported (free pages, freeblocks, page slack, and pages that are not b-tree
+    pages, such as overflow or freelist pages in a WAL frame). An object in the cell area of a b-tree page is
+    inside a cell: the record path decodes that cell with its real rowid and columns (the live row, a superseded,
+    earlier, uncommitted or stale version), so it is never reported here as 'record header lost'; such objects are
+    counted in stats["json_in_cells"]."""
+    stats = {} if stats is None else stats
+    stats.setdefault("json_in_cells", 0)
     seen = set()
     live = _live_json(db_path, errors)
     for js in (live or []) + [r.get("json") for r in carved if r.get("table") == "notifications"]:
@@ -683,23 +696,32 @@ def carve_notification_json(db_path, data, ps, fl, include_wal, carved, errors):
             rec["wal_frame"] = frame
         if live is None:
             rec["live_check"] = "live rows unreadable - this may be a live row"
+        if frame is not None:
+            rec["wal_frame_state"] = frame_state
         out.append(rec)
 
     name = os.path.basename(db_path)
+    frame_state = None
     for pno in range(1, len(data) // ps + 1):
         base = (pno - 1) * ps
-        for off, text, o in json_objects(data[base:base + ps]):
-            take(text, o, name, pno, _region_of(data, ps, pno, fl, base + off), base + off)
+        page = data[base:base + ps]
+        for off, text, o in json_objects(page):
+            region = _json_place(page, off, 100 if pno == 1 else 0, pno in fl)
+            if region is None:
+                stats["json_in_cells"] += 1         # inside a cell: the record path decodes it, with its real rowid
+                continue
+            take(text, o, name, pno, region, base + off)
     if include_wal:
         wp = db_path + "-wal"
-        wps = ps
-        for idx, pno, page in wal_frames(wp, ps):
-            wps = len(page)
-            frame_data = 32 + idx * (24 + wps) + 24      # where this page image starts in the -wal file
+        for f in wal_read(wp, ps):
+            idx, pno, page, frame_state = f["index"], f["pno"], f["page"], f["state"]
+            frame_data = 32 + idx * (24 + len(page)) + 24      # where this page image starts in the -wal file
             for off, text, o in json_objects(page):
-                hdr = 100 if pno == 1 else 0
-                take(text, o, os.path.basename(wp), pno, _region_of(page, wps, 1, set(), off, hdr),
-                     frame_data + off, idx)
+                region = _json_place(page, off, 100 if pno == 1 else 0, False)
+                if region is None:
+                    stats["json_in_cells"] += 1
+                    continue
+                take(text, o, os.path.basename(wp), pno, region, frame_data + off, idx)
     return out
 
 
@@ -832,9 +854,9 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
         recs = [r for r in recs if r["table"] not in PLUMBING]
 
     uniq = classify(db_path, recs, stats["errors"])
-    stats["json_carved"] = 0
+    stats["json_carved"] = stats["json_in_cells"] = 0
     if json_pass and has_notification_json(shapes):
-        jr = carve_notification_json(db_path, data, ps, fl, include_wal, uniq, stats["errors"])
+        jr = carve_notification_json(db_path, data, ps, fl, include_wal, uniq, stats["errors"], stats)
         stats["json_carved"] = len(jr)
         uniq += jr
     stats["records"] = len(uniq)

@@ -553,6 +553,63 @@ class JsonCarve(unittest.TestCase):
             self.assertEqual(sorted(keys), ["0|%s|302|null|10001" % JPKG, "0|%s|303|null|10001" % JPKG], notif)
 
 
+class JsonPassOnlyDeadSpace(unittest.TestCase):
+    """A notification json inside a valid cell belongs to the record path, with its real rowid and columns."""
+
+    def edited_notification(self, tmp, checkpoint_first):
+        src, dst = os.path.join(tmp, "src.db"), os.path.join(tmp, "notifications.db")
+        w = wal_writer(src)
+        try:
+            for s in pldemo.DDL["notifications.db"]:
+                w.execute(s)
+            nid, js, post_ms = json_note(1, 10)
+            w.execute("INSERT INTO notifications (notification_id, package_name, json, post_time) VALUES (?, ?, ?, ?)",
+                      (nid, JPKG, js, filetime_from_ms(post_ms)))
+            if checkpoint_first:
+                w.execute("PRAGMA wal_checkpoint(TRUNCATE)")      # the main file holds the first version
+            _, js2, post2 = json_note(1, 11)                      # the app updates it in place: same rowid and key
+            w.execute("UPDATE notifications SET json = ?, post_time = ? WHERE id = 1", (js2, filetime_from_ms(post2)))
+            copy_db_set(src, dst)
+        finally:
+            w.close()
+        return dst, js, filetime_from_ms(post_ms)
+
+    def check(self, recs, js, post_time, source_file, region):
+        old = [r for r in recs if r["table"] == "notifications" and r.get("json") == js]
+        self.assertEqual(len(old), 1, recs)
+        self.assertNotEqual(old[0]["status"], plcarve.JSON_STATUS)
+        self.assertEqual(old[0]["status"], plcarve.WAL_EARLIER_VERSION)
+        self.assertEqual((old[0]["rowid"], old[0]["post_time"], old[0]["notification_id"]), (1, post_time, "j-1"))
+        self.assertEqual((old[0]["source_file"], old[0]["region"]), (source_file, region))
+        self.assertFalse([r for r in recs if r["status"] == plcarve.JSON_STATUS], recs)
+
+    def test_older_wal_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst, js, pt = self.edited_notification(tmp, checkpoint_first=False)
+            recs, st = plcarve.carve_db(dst)
+            self.check(recs, js, pt, "notifications.db-wal", plcarve.SUPERSEDED_REGION)
+            self.assertEqual(st["json_carved"], 0)
+
+    def test_main_file_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst, js, pt = self.edited_notification(tmp, checkpoint_first=True)
+            recs, st = plcarve.carve_db(dst)
+            self.check(recs, js, pt, "notifications.db", plcarve.MAIN_SUPERSEDED_REGION)
+
+    def test_json_inside_a_cell_the_record_path_cannot_decode_is_not_called_header_lost(self):
+        # json_in_cell: an object inside a valid cell is never reported by the json pass
+        with tempfile.TemporaryDirectory() as tmp:
+            dst, js, pt = self.edited_notification(tmp, checkpoint_first=False)
+            real = plcarve.carve_region
+            plcarve.carve_region = lambda *a, **k: []              # as if no record could be decoded at all
+            try:
+                recs, st = plcarve.carve_db(dst)
+            finally:
+                plcarve.carve_region = real
+            self.assertFalse([r for r in recs if r.get("json") == js], recs)
+            self.assertGreaterEqual(st["json_in_cells"], 1)
+
+
 def make_truncated_in_trunk(path):
     """A database with a long freelist, cut 16 bytes into its first freelist trunk page. Returns the trunk page."""
     c = sqlite3.connect(path)
