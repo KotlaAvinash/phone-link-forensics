@@ -31,8 +31,25 @@ then by decoded values):
   wal-superseded (earlier version of live row)
                          a live cell of a superseded page version; the rowid is
                          live, the values differ
+  wal-uncommitted        a live cell of a WAL frame after the log's last commit
+                         frame: a transaction that was never committed
+  wal-stale              a live cell of a WAL frame whose salts are not the WAL
+                         header's: left over from an older generation of the log
+  wal-invalid (checksum mismatch)
+                         a live cell of a WAL frame with the header's salts whose
+                         checksum chain fails (torn or damaged write)
   unknown - live rows unreadable
                          the live table could not be read, so liveness is unknown
+For the last three, `rowid_live` says whether a live row has that rowid.
+
+WAL FRAMES ARE VALIDATED as SQLite reads them (wal_read): the log is the run of
+frames from the start whose salts equal the WAL header's and whose cumulative
+checksums VERIFY (header and every frame checksum are checked); frames of that
+run up to the last commit frame (non-zero database-size field) are committed.
+The current version of a page is its last committed frame (else the main
+file's image); only committed frames make another version superseded. Every
+WAL-derived record carries wal_frame (index) and wal_frame_state (committed,
+uncommitted, stale (older WAL generation), invalid (checksum mismatch)).
 A live cell of a superseded version whose values equal the live row is NOT
 reported: every live row has such copies. A table column whose name is also a
 field of the carver (message.status, postaladdress.region) is written as
@@ -200,8 +217,14 @@ DELETED = "deleted_or_overwritten"            # dead space: no live row has that
 EARLIER_VERSION = "earlier version of live row"   # dead space: the rowid is live, its values differ
 WAL_SUPERSEDED = "wal-superseded"             # a cell of a superseded page version; its rowid is no longer live
 WAL_EARLIER_VERSION = "wal-superseded (earlier version of live row)"   # ... its rowid is live, its values differ
+WAL_UNCOMMITTED = "wal-uncommitted"           # a live cell of a WAL frame after the log's last commit
+WAL_STALE = "wal-stale"                       # a live cell of a WAL frame of an older log generation (other salts)
+WAL_INVALID = "wal-invalid (checksum mismatch)"   # a live cell of a WAL frame whose checksum chain fails
 # _version of a record decoded from a page version's live cells -> (status if rowid not live, if live but different)
-VERSION_STATUS = {"superseded": (WAL_SUPERSEDED, WAL_EARLIER_VERSION)}
+VERSION_STATUS = {"superseded": (WAL_SUPERSEDED, WAL_EARLIER_VERSION),
+                  "uncommitted": (WAL_UNCOMMITTED, WAL_UNCOMMITTED),
+                  "stale": (WAL_STALE, WAL_STALE),
+                  "invalid": (WAL_INVALID, WAL_INVALID)}
 SUPERSEDED_REGION = "wal-superseded-cell"   # region: a live cell of a WAL frame that a later frame supersedes
 MAIN_SUPERSEDED_REGION = "main-superseded-cell"   # region: a live cell of the main file's image of a page the WAL holds
 
@@ -222,25 +245,78 @@ def leaf_cells(page, hdr_off=0):
     return out
 
 
-def wal_frames(path, ps):
-    """Yield (frame_index, page_number, page_bytes) from a -wal file."""
+# State of a WAL frame (wal_read). Only "committed" frames are part of the database as SQLite reads it.
+COMMITTED = "committed"          # in the valid log, at or before its last commit frame
+UNCOMMITTED = "uncommitted"      # in the valid log (salts and checksums match) but after its last commit frame
+STALE = "stale (older WAL generation)"     # its salts are not the WAL header's: left over from before a log restart
+INVALID = "invalid (checksum mismatch)"    # the header's salts, but the checksum chain fails at or before it
+
+
+FRAME_VERSION = {UNCOMMITTED: "uncommitted", STALE: "stale", INVALID: "invalid"}   # frame state -> record _version
+
+
+def wal_checksum(buf, s0, s1, big):
+    """SQLite's WAL checksum over buf (a multiple of 8 bytes), continued from (s0, s1)."""
+    words = struct.unpack((">" if big else "<") + "%dI" % (len(buf) // 4), buf)
+    for i in range(0, len(words), 2):
+        s0 = (s0 + words[i] + s1) & 0xFFFFFFFF
+        s1 = (s1 + words[i + 1] + s0) & 0xFFFFFFFF
+    return s0, s1
+
+
+def wal_read(path, ps):
+    """Read a -wal file. Returns a list of frames {index, pno, page, state, commit} (see the states above).
+
+    As SQLite does: the log is the run of frames from the start whose salts equal the header's and whose cumulative
+    checksums verify; it ends at the first frame that fails. Frames of that run up to the last commit frame (a
+    non-zero database-size field) are committed, the rest of the run is uncommitted. A frame after the run whose
+    salts differ belongs to an older generation of the log (stale); one with the header's salts is invalid. A WAL
+    header whose own checksum fails makes every frame invalid."""
     if not os.path.isfile(path):
-        return
+        return []
     with open(path, "rb") as fh:
         data = fh.read()
     if len(data) < 32:
-        return
+        return []
     magic, ver, fps = struct.unpack(">III", data[0:12])
     if magic not in (0x377F0682, 0x377F0683):
-        return
+        return []
+    big = bool(magic & 1)                       # 0x377F0683: checksum words are big-endian
     if fps:
         ps = fps
+    salts = data[16:24]
+    s = struct.unpack(">II", data[24:32])
+    in_log = wal_checksum(data[0:24], 0, 0, big) == s
+    frames, last_commit = [], None
     off, i = 32, 0
     while off + 24 + ps <= len(data):
-        pno = struct.unpack(">I", data[off:off + 4])[0]
-        yield (i, pno, data[off + 24: off + 24 + ps])
+        pno, dbsize = struct.unpack(">II", data[off:off + 8])
+        page = data[off + 24: off + 24 + ps]
+        if data[off + 8:off + 16] != salts:
+            state, in_log = STALE, False
+        elif not in_log:
+            state = INVALID
+        else:
+            c = wal_checksum(data[off:off + 8] + page, s[0], s[1], big)
+            if c == struct.unpack(">II", data[off + 16:off + 24]):
+                s, state = c, COMMITTED
+                if dbsize:
+                    last_commit = i
+            else:
+                state, in_log = INVALID, False
+        frames.append({"index": i, "pno": pno, "page": page, "state": state, "commit": bool(dbsize)})
         off += 24 + ps
         i += 1
+    for f in frames:
+        if f["state"] == COMMITTED and (last_commit is None or f["index"] > last_commit):
+            f["state"] = UNCOMMITTED
+    return frames
+
+
+def wal_frames(path, ps):
+    """Yield (frame_index, page_number, page_bytes) of every frame of a -wal file, whatever its state."""
+    for f in wal_read(path, ps):
+        yield (f["index"], f["pno"], f["page"])
 
 
 # ------------------------------------------------------------------ carving
@@ -666,8 +742,12 @@ def classify(db_path, recs, errors):
                 r["status"] = ALSO_LIVE
             else:
                 r["status"] = VERSION_STATUS[version][1] if version else EARLIER_VERSION
+            if version and version != "superseded":
+                r["rowid_live"] = "yes - the live row's values differ"
         else:
             r["status"] = VERSION_STATUS[version][0] if version else DELETED
+            if version and version != "superseded":
+                r["rowid_live"] = "no"
         for k in [k for k in r if k.startswith("_")]:
             del r[k]
         out.append(r)
@@ -702,10 +782,12 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
 
     if include_wal:
         wp = db_path + "-wal"
-        frames = list(wal_frames(wp, ps))
-        newest = {pno: idx for idx, pno, _ in frames}      # the last frame of each page supersedes the earlier ones
-        # The main file's image of a page the WAL holds is an older version too: a row deleted after the last
-        # checkpoint, whose freed space in the WAL copy was reused, survives there whole.
+        frames = wal_read(wp, ps)
+        # The current version of a page is its last COMMITTED frame (else the main file's image). Uncommitted, stale
+        # and invalid frames never decide what is superseded.
+        newest = {f["pno"]: f["index"] for f in frames if f["state"] == COMMITTED}
+        # The main file's image of a page the WAL holds a committed version of is an older version too: a row
+        # deleted after the last checkpoint, whose freed space in the WAL copy was reused, survives there whole.
         for pno in sorted(newest):
             if pno in fl or pno > npages:
                 continue
@@ -717,23 +799,32 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
                     r["offset"] = base + off
                     r["_version"] = "superseded"
                     recs.append(r)
-        for idx, pno, page in frames:
+        for f in frames:
+            idx, pno, page, state = f["index"], f["pno"], f["page"], f["state"]
             stats["wal_frames"] += 1
+            stats["wal_" + state.split()[0]] = stats.get("wal_" + state.split()[0], 0) + 1
+            tag = {"wal_frame": idx, "wal_frame_state": state}
             # A frame is a standalone page image at buffer offset 0, so walk it as
             # page 1 (base=0) but apply the file-header skip only if it really IS
             # page 1. Getting this wrong misreads every frame's page header.
             hdr_off = 100 if pno == 1 else 0
             for kind, off, ln in page_regions(page, ps, 1, set(), hdr_offset=hdr_off):
-                recs += carve_region(page, off, ln, shapes, ps,
-                                     os.path.basename(wp), pno, "wal-" + kind, min_text, usable)
-            if newest[pno] != idx:
-                # An older version of the page: its LIVE cells are rows as they were then, and a row since deleted
-                # survives here whole. Each cell is decoded where its pointer says it starts.
-                for off in leaf_cells(page, hdr_off):
-                    for r in carve_region(page, off, 1, shapes, ps, os.path.basename(wp), pno,
-                                          SUPERSEDED_REGION, min_text, usable):
-                        r["_version"] = "superseded"
-                        recs.append(r)
+                for r in carve_region(page, off, ln, shapes, ps, os.path.basename(wp), pno, "wal-" + kind,
+                                      min_text, usable):
+                    recs.append(dict(r, **tag))
+            if state == COMMITTED:
+                if newest[pno] == idx:
+                    continue                  # the current version: its cells are the live rows
+                version = "superseded"
+            else:
+                version = FRAME_VERSION[state]
+            # An older (or never committed) version of the page: its LIVE cells are rows as they were then, and a row
+            # since deleted survives here whole. Each cell is decoded where its pointer says it starts.
+            region = SUPERSEDED_REGION if version == "superseded" else "wal-%s-cell" % version
+            for off in leaf_cells(page, hdr_off):
+                for r in carve_region(page, off, 1, shapes, ps, os.path.basename(wp), pno, region, min_text, usable):
+                    r.update(tag, _version=version)
+                    recs.append(r)
 
     # Plumbing tables are matched (so their records are not mislabelled as some
     # other table of the same width) but dropped here unless explicitly wanted.

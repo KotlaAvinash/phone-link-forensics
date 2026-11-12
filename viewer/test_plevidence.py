@@ -860,6 +860,151 @@ class EarlierVersions(unittest.TestCase):
             self.assertEqual(plcarve.EARLIER_VERSION, "earlier version of live row")
 
 
+def wal_layout(wal):
+    """(page size, [frame offsets]) of a -wal file's bytes."""
+    ps = int.from_bytes(wal[8:12], "big")
+    return ps, list(range(32, len(wal) - 24 - ps + 1, 24 + ps))
+
+
+def wal_resum(wal, start_frame):
+    """Recompute the cumulative checksums from frame start_frame on (fixture helper, written apart from plcarve)."""
+    ps, offs = wal_layout(wal)
+    big = wal[3] == 0x83
+    order = "big" if big else "little"
+
+    def ck(buf, s0, s1):
+        for i in range(0, len(buf), 8):
+            s0 = (s0 + int.from_bytes(buf[i:i + 4], order) + s1) & 0xFFFFFFFF
+            s1 = (s1 + int.from_bytes(buf[i + 4:i + 8], order) + s0) & 0xFFFFFFFF
+        return s0, s1
+    prev = wal[24:32] if start_frame == 0 else wal[offs[start_frame - 1] + 16:offs[start_frame - 1] + 24]
+    s0, s1 = int.from_bytes(prev[:4], "big"), int.from_bytes(prev[4:], "big")
+    for o in offs[start_frame:]:
+        s0, s1 = ck(bytes(wal[o:o + 8]) + bytes(wal[o + 24:o + 24 + ps]), s0, s1)
+        wal[o + 16:o + 24] = s0.to_bytes(4, "big") + s1.to_bytes(4, "big")
+
+
+class WalValidation(unittest.TestCase):
+    """Which WAL frames count: salts, checksums and commit frames, as SQLite reads them."""
+
+    def two_commits(self, tmp, last_sql):
+        """message rows 1 and 2 committed; then last_sql committed as the last frame. Returns the copy's path."""
+        src, dst = os.path.join(tmp, "src.db"), os.path.join(tmp, "phone.db")
+        w = wal_writer(src)
+        try:
+            w.execute(MSG_DDL)
+            w.execute("INSERT INTO message VALUES (1, 5, 'alpha', 1)")
+            w.execute("INSERT INTO message VALUES (2, 5, 'beta', 1)")
+            w.execute(last_sql)
+            copy_db_set(src, dst)
+        finally:
+            w.close()
+        os.remove(dst + "-shm")          # SQLite rebuilds its WAL index from the -wal bytes themselves
+        return dst
+
+    def test_unmodified_wal_frames_are_all_committed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = self.two_commits(tmp, "UPDATE message SET body = 'gamma' WHERE message_id = 2")
+            frames = plcarve.wal_read(dst + "-wal", 4096)
+            self.assertGreaterEqual(len(frames), 4)
+            self.assertEqual({f["state"] for f in frames}, {plcarve.COMMITTED})     # checksums verify
+            self.assertTrue(frames[-1]["commit"])
+
+    def test_checksum_mismatch_ends_the_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = self.two_commits(tmp, "UPDATE message SET body = 'gamma' WHERE message_id = 2")
+            wal = bytearray(read_bytes(dst + "-wal"))
+            ps, offs = wal_layout(wal)
+            wal[offs[-2] + 24 + ps // 2] ^= 0xFF          # damage the second-last frame's page
+            with open(dst + "-wal", "wb") as fh:
+                fh.write(wal)
+            states = [f["state"] for f in plcarve.wal_read(dst + "-wal", 4096)]
+            self.assertEqual(states[-2:], [plcarve.INVALID, plcarve.INVALID])
+            self.assertEqual(set(states[:-2]), {plcarve.COMMITTED})
+
+    def test_frame_after_the_last_commit_is_uncommitted_and_does_not_supersede(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = self.two_commits(tmp, "UPDATE message SET body = 'ALPHA PENDING EDIT' WHERE message_id = 1")
+            wal = bytearray(read_bytes(dst + "-wal"))
+            ps, offs = wal_layout(wal)
+            wal[offs[-1] + 4:offs[-1] + 8] = bytes(4)     # its commit marker gone: a transaction never committed
+            wal_resum(wal, len(offs) - 1)
+            with open(dst + "-wal", "wb") as fh:
+                fh.write(wal)
+            frames = plcarve.wal_read(dst + "-wal", 4096)
+            self.assertEqual(frames[-1]["state"], plcarve.UNCOMMITTED)
+            self.assertEqual({f["state"] for f in frames[:-1]}, {plcarve.COMMITTED})
+            self.assertEqual(plcarve.live_values(dst, "message", {1})[1][2], "alpha")   # SQLite ignores the frame
+            recs, st = plcarve.carve_db(dst)
+            pend = [r for r in recs if r.get("body") == "ALPHA PENDING EDIT"]
+            self.assertEqual(len(pend), 1, recs)
+            self.assertEqual(pend[0]["status"], plcarve.WAL_UNCOMMITTED)
+            self.assertEqual(plcarve.WAL_UNCOMMITTED, "wal-uncommitted")
+            self.assertEqual(pend[0]["wal_frame_state"], plcarve.UNCOMMITTED)
+            self.assertEqual(pend[0]["wal_frame"], len(offs) - 1)
+            self.assertTrue(pend[0]["rowid_live"].startswith("yes"))
+            # the committed frame holding the live rows is the current version, not a superseded one
+            self.assertFalse([r for r in recs if r.get("body") in ("alpha", "beta")
+                              and r["status"] not in (plcarve.ALSO_LIVE,)], recs)
+
+    def test_rows_of_a_transaction_still_open_are_uncommitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = os.path.join(tmp, "src.db"), os.path.join(tmp, "phone.db")
+            w = wal_writer(src)
+            try:
+                w.execute("PRAGMA cache_size=2")          # a tiny cache spills the open transaction into the -wal
+                w.execute(MSG_DDL)
+                w.execute("INSERT INTO message VALUES (1, 5, 'committed row', 1)")
+                w.execute("BEGIN")
+                for i in range(2, 400):
+                    w.execute("INSERT INTO message VALUES (?, 5, ?, 1)", (i, "PENDING row %d %s" % (i, "x" * 60)))
+                for suf in ("", "-wal"):
+                    shutil.copyfile(src + suf, dst + suf)
+                w.execute("ROLLBACK")
+            finally:
+                w.close()
+            states = [f["state"] for f in plcarve.wal_read(dst + "-wal", 4096)]
+            self.assertIn(plcarve.UNCOMMITTED, states)
+            self.assertEqual(states, sorted(states, key=lambda s: s == plcarve.UNCOMMITTED))   # all after the commits
+            recs, _ = plcarve.carve_db(dst)
+            pending = [r for r in recs if "PENDING row" in str(r.get("body"))]
+            self.assertTrue(pending)
+            self.assertEqual({r["status"] for r in pending if r["region"] == "wal-uncommitted-cell"},
+                             {plcarve.WAL_UNCOMMITTED})
+            self.assertTrue([r for r in pending if r["region"] == "wal-uncommitted-cell"])
+            self.assertEqual({r["wal_frame_state"] for r in pending}, {plcarve.UNCOMMITTED})
+            self.assertFalse([r for r in pending if r["status"] in (plcarve.WAL_SUPERSEDED, plcarve.DELETED)])
+
+    def test_frames_of_an_older_log_generation_are_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = os.path.join(tmp, "src.db"), os.path.join(tmp, "phone.db")
+            w = wal_writer(src)
+            try:
+                w.execute(MSG_DDL)
+                w.execute("INSERT INTO message VALUES (1, 5, 'first row', 1)")
+                w.execute("INSERT INTO message VALUES (2, 5, 'OLDER GENERATION ROW', 1)")
+                # zero the deleted cell, so the row survives only as a live cell of the older-generation frame
+                w.execute("PRAGMA secure_delete = ON")
+                w.execute("DELETE FROM message WHERE message_id = 2")
+                w.execute("PRAGMA secure_delete = OFF")
+                w.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                w.execute("INSERT INTO message VALUES (3, 5, 'new generation', 1)")   # restarts the log: new salts
+                copy_db_set(src, dst)
+            finally:
+                w.close()
+            frames = plcarve.wal_read(dst + "-wal", 4096)
+            self.assertEqual(frames[0]["state"], plcarve.COMMITTED)
+            self.assertIn(plcarve.STALE, {f["state"] for f in frames[1:]})
+            self.assertEqual({f["state"] for f in frames[1:]}, {plcarve.STALE})
+            recs, _ = plcarve.carve_db(dst)
+            old = [r for r in recs if r.get("body") == "OLDER GENERATION ROW" and r["region"] == "wal-stale-cell"]
+            self.assertEqual(len(old), 1, recs)
+            self.assertEqual(old[0]["status"], plcarve.WAL_STALE)
+            self.assertEqual(plcarve.WAL_STALE, "wal-stale")
+            self.assertEqual((old[0]["rowid_live"], old[0]["wal_frame_state"]), ("no", plcarve.STALE))
+            self.assertFalse([r for r in recs if r["status"] == plcarve.WAL_SUPERSEDED], recs)
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
