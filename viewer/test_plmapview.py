@@ -2439,6 +2439,25 @@ class ViewerReview3Test(unittest.TestCase):
         self.assertIn("Ctrl+Left", app.hints[app.filter_lbl])
         self.assertIn("Alt+Down", app.hints[app.filter_lbl])
 
+    # ---- 10 a click in a text box while a panel is open
+    def test_clicking_a_text_box_closes_the_panel_and_keeps_the_focus_there(self):
+        app = self.sized(1366, 740)
+        app.show("E_calls")
+        app.focus_force()
+        app.update()
+        for target in (app.from_entry, app.filter_entry):
+            app.open_filter("Type")
+            app.update()
+            target.event_generate("<Button-1>", x=5, y=5)
+            target.event_generate("<ButtonRelease-1>", x=5, y=5)
+            app.update()
+            self.assertIsNone(app.panel)
+            self.assertIs(app.focus_get(), target)
+        p = app.open_filter("Type")             # Cancel / Esc still hand the focus back to the table
+        p.cancel()
+        app.update()
+        self.assertIs(app.focus_get(), app.table)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1340,13 +1340,17 @@ class Viewer(tk.Tk):
             except tk.TclError:
                 pass
 
-    def close_panel(self):
+    def close_panel(self, refocus=True):
+        """Close the open filter panel. refocus: hand the keyboard back to the table (OK, Cancel, Esc); a click
+        somewhere else keeps the focus where the click put it."""
         p, self.panel = self.panel, None
         if p is not None:
             try:
+                had = str(self.focus_get() or "").startswith(str(p))
                 p.destroy()
-                self.table.focus_set()
-            except tk.TclError:
+                if refocus or had:
+                    self.table.focus_set()
+            except (tk.TclError, KeyError):
                 pass
 
     def _column_at(self, x):
@@ -1420,7 +1424,7 @@ class Viewer(tk.Tk):
     def _click_outside(self, e):
         """A click anywhere outside the open panel cancels it, as in Excel."""
         if self.panel is not None and not str(e.widget).startswith(str(self.panel)):
-            self.close_panel()
+            self.close_panel(refocus=False)      # the click (a text box, a list) keeps the focus it gave
 
     # ---- the text box
     def _key_typed(self, _=None):
