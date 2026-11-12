@@ -359,7 +359,7 @@ class Notifications(unittest.TestCase):
 
 def build_edited(case, edits=None, **kw):
     """pldemo device in a folder of its own, optional SQL edits {db: [sql | (sql, params)]}, built graph."""
-    tmp = tempfile.mkdtemp(prefix="plrelate-test-")
+    tmp = tempfile.mkdtemp(prefix=TEST_TMP_PREFIX)
     case.addCleanup(shutil.rmtree, tmp, True)
     src = pldemo.build(os.path.join(tmp, "device"))
     for db, stmts in (edits or {}).items():
@@ -372,6 +372,18 @@ def build_edited(case, edits=None, **kw):
     ev = R.Evidence(src)
     case.addCleanup(ev.close)
     return ev, R.build(ev, **kw)
+
+
+TEST_TMP_PREFIX = "pltest-relate-"      # never plrelate-* / pldevices-*: those are the viewer's copies
+
+
+class TestFolders(unittest.TestCase):
+    def test_test_folders_cannot_be_mistaken_for_viewer_copies(self):
+        # the viewer counts plrelate-* / pldevices-* folders in %TEMP% as its own copies left behind
+        ev, g = build_edited(self)
+        name = os.path.basename(os.path.dirname(ev.src))
+        self.assertFalse(name.startswith(("plrelate-", "pldevices-")), name)
+        self.assertFalse(TEST_TMP_PREFIX.startswith(("plrelate-", "pldevices-")))
 
 
 def linked_to(g, entity, rid):
@@ -493,7 +505,7 @@ class SchemaTolerance(unittest.TestCase):
         self.assertNotIn("TABLE NOT IN THIS COPY", g.views["E_calls"].basis)
 
     def test_missing_database_is_stated(self):
-        tmp = tempfile.mkdtemp(prefix="plrelate-test-")
+        tmp = tempfile.mkdtemp(prefix=TEST_TMP_PREFIX)
         self.addCleanup(shutil.rmtree, tmp, True)
         src = pldemo.build(os.path.join(tmp, "device"))
         os.remove(os.path.join(src, "photos.db"))
