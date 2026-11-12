@@ -474,14 +474,17 @@ def _build(pc, g, View, ts_seconds, iso):
                                           "stored) - which device it was is not recorded"})
                 continue
             try:
-                for x in entries if isinstance(entries, list) else [None]:
+                for n_entry, x in enumerate(entries if isinstance(entries, list) else [None]):
                     m = x.get("Metadata") or {}
                     inner = m.get("Metadata") or {}
                     reg, reg_ts = _iso(m.get("RegitrationTime") or m.get("RegistrationTime"))  # Microsoft's spelling
                     seen, seen_ts = _iso(m.get("LastSeenTime"))
                     kind = _device_kind(inner)
-                    e = ("phone", m.get("Id") or hw)     # internal key only; the label and Kind say what it is
-                    mids[m.get("Id")] = e
+                    # internal key only; the label and Kind say what it is. Without an Id, every entry of the
+                    # hardware ID after the first gets its own key, so two entries never collide into one entity
+                    e = ("phone", m.get("Id") or (hw if n_entry == 0 else f"{hw} (entry {n_entry + 1})"))
+                    if m.get("Id"):
+                        mids[m.get("Id")] = e
                     name = inner.get("DisplayName") or inner.get("ModelName") or hw
                     g.label[e] = {"phone": f"phone {name}",
                                   "pc": f"Windows PC {name} (this PC or a Windows companion - not a phone)",

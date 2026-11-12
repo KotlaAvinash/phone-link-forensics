@@ -673,6 +673,22 @@ class LastSeenInHistory(unittest.TestCase):
         self.assertTrue(all("(no zone)" in r["TimeUTC"] for r in rows[1:]), rows)
 
 
+class MetadataEntriesWithoutId(unittest.TestCase):
+    def test_two_entries_under_one_hardware_id_stay_two_entities(self):
+        meta = {"DeviceMetadatas": {"HW1": [{"Metadata": {"Metadata": {"DisplayName": "P1", "OsName": "Android"}}},
+                                            {"Metadata": {"Metadata": {"DisplayName": "P2", "OsName": "Android"}}}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, meta=meta)
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+        rows = g.views["PC_phones"].rows
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["_e"], rows[1]["_e"])
+        self.assertEqual({g.label[r["_e"]] for r in rows}, {"phone P1", "phone P2"})
+        self.assertEqual({g.home[r["_e"]] for r in rows}, {("PC_phones", 0), ("PC_phones", 1)})
+
+
 class LinkDetection(unittest.TestCase):
     def test_reparse_point_attribute_is_a_link_even_without_isjunction(self):
         # Python 3.8-3.11 has no os.path.isjunction and lstat does not flag junctions: the attribute must
