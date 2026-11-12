@@ -472,10 +472,35 @@ def db_health(path):
 # identical to the caller, so a forensic tool must not let them look identical in
 # the report: "0 messages" must never silently mean "the query blew up".
 QUERY_ERRORS = []
+# Columns a query's rows were asked for but this copy's table does not have ("file: table.column"). A Phone Link
+# version can lack a column; its field is then blank and the run says so once, instead of ending on a KeyError.
+MISSING_COLUMNS = []
+_FROM_RE = re.compile(r"\bFROM\s+\"?(\w+)", re.I)
+_NO_COL_RE = re.compile(r"no such column: (?:\w+\.)?(\w+)")
+
+
+class _Row(dict):
+    """A query row whose missing column reads as None (and is recorded once in MISSING_COLUMNS)."""
+    __slots__ = ("_where",)
+
+    def __missing__(self, col):
+        miss = "%s: %s.%s" % (self._where[0], self._where[1], col)
+        if miss not in MISSING_COLUMNS:
+            MISSING_COLUMNS.append(miss)
+        return None
+
+
+def missing_columns_warning():
+    """One warning naming every column that was missing, '' when none was."""
+    if not MISSING_COLUMNS:
+        return ""
+    return ("%d column(s) the parser reads are not in this copy of the database (another Phone Link version?), "
+            "so those fields are blank: %s" % (len(MISSING_COLUMNS), "; ".join(MISSING_COLUMNS)))
 
 
 def q(path, sql, params=()):
-    """Query helper: missing table or file yields [] AND records why."""
+    """Query helper: missing table or file yields [] AND records why. Rows are dicts in which a column this copy
+    lacks reads as None and is recorded in MISSING_COLUMNS; an ORDER BY on such a column is dropped, not fatal."""
     if not path:
         QUERY_ERRORS.append({"file": "(none)", "sql": sql.strip()[:120], "error": "no path given"})
         return []
@@ -483,11 +508,30 @@ def q(path, sql, params=()):
         QUERY_ERRORS.append({"file": os.path.basename(path), "sql": sql.strip()[:120],
                              "error": "file not present"})
         return []
+    m = _FROM_RE.search(sql)
+    where = (os.path.basename(path), m.group(1) if m else "?")
+
+    def wrap(r):
+        row = _Row(r)
+        row._where = where
+        return row
     try:
         c = sqlite3.connect(ro_uri(path), uri=True)
         c.row_factory = sqlite3.Row
         try:
-            rows = [dict(r) for r in c.execute(sql, params)]
+            try:
+                cur = c.execute(sql, params)
+            except sqlite3.OperationalError as e:
+                # The ORDER BY column is not in this version of the table: read the rows unordered rather than none.
+                gone = _NO_COL_RE.search(str(e))
+                head, sep, order = sql.rpartition(" ORDER BY ")
+                if not (gone and sep and gone.group(1) in order):
+                    raise
+                miss = "%s: %s.%s" % (where[0], where[1], gone.group(1))
+                if miss not in MISSING_COLUMNS:
+                    MISSING_COLUMNS.append(miss)
+                cur = c.execute(head, params)
+            rows = [wrap(r) for r in cur]
         finally:
             c.close()
         return rows
@@ -1119,8 +1163,11 @@ def run(a, pkg_work):
                                         "this check)." % (n, fl))
 
             del QUERY_ERRORS[:]                      # per-device
+            del MISSING_COLUMNS[:]
             idx = build_contact_index(dbs.get("contacts.db"), a.digits)
             d = parse_all(dbs, ft_work, idx, a.digits, device_label=label)
+            if MISSING_COLUMNS:
+                warnings.append(missing_columns_warning())
 
             if d.get("_ft_scope_warning"):
                 warnings.append(d["_ft_scope_warning"])

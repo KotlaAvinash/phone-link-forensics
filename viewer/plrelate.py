@@ -113,6 +113,7 @@ class Evidence:
         self._con = {}
         self._cols = {}
         self.missing = {}       # (db, table) -> columns the viewer asked for that this copy does not have
+        self.absent = set()     # (db, table) the viewer asked for that this copy does not have at all
         try:
             self.paths = P.stage(self.src, self.work, self.acq)
             for row in self.acq:
@@ -177,6 +178,7 @@ class Evidence:
         order: column names (optionally 'name DESC') applied when the table has them."""
         have = self.columns(db, table)
         if not have:
+            self.absent.add((db, table))     # the whole table (or its database) is not in this copy
             return []
         use = [c for c in cols if c in have or c == "rowid"]
         lost = [c for c in cols if c not in use]
@@ -195,8 +197,14 @@ class Evidence:
 
     def missing_note(self, sources):
         """Sentence naming the columns missing from the given (db, table) sources, '' when none."""
-        lost = sorted(f"{t}.{c}" for db, t in dict.fromkeys(sources) for c in self.missing.get((db, t), ()))
-        return (" - NOT IN THIS COPY of the database, so these fields are blank: " + ", ".join(lost)) if lost else ""
+        sources = list(dict.fromkeys(sources))
+        lost = sorted(f"{t}.{c}" for db, t in sources for c in self.missing.get((db, t), ()))
+        note = (" - NOT IN THIS COPY of the database, so these fields are blank: " + ", ".join(lost)) if lost else ""
+        gone = [(db, t) for db, t in sources if (db, t) in self.absent]
+        if gone:
+            note += (" - TABLE NOT IN THIS COPY, so its rows cannot be shown: "
+                     + ", ".join(f"{db} {t}" + ("" if db in self.paths else f" ({db} absent)") for db, t in gone))
+        return note
 
     def count(self, db, table):
         return self.con(db).execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] if self.has(db, table) else None

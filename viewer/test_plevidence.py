@@ -656,6 +656,68 @@ class ParseAll(unittest.TestCase):
             self.assertEqual(t["bodies_retained"], "", t)
 
 
+def drop_column(path, table, col):
+    """Remove one column from a database: ALTER, or rebuild the table without constraints."""
+    c = sqlite3.connect(path)
+    try:
+        c.execute('ALTER TABLE "%s" DROP COLUMN "%s"' % (table, col))
+    except sqlite3.OperationalError:     # unique, indexed or key columns cannot be altered away
+        keep = [r for r in c.execute('PRAGMA table_info("%s")' % table) if r[1] != col]
+        names = ", ".join('"%s"' % r[1] for r in keep)
+        c.execute('CREATE TABLE "_new" (%s)' % ", ".join('"%s" %s' % (r[1], r[2]) for r in keep))
+        c.execute('INSERT INTO "_new" (%s) SELECT %s FROM "%s"' % (names, names, table))
+        c.execute('DROP TABLE "%s"' % table)
+        c.execute('ALTER TABLE "_new" RENAME TO "%s"' % table)
+    c.commit()
+    c.close()
+
+
+class ParseSchemaTolerance(unittest.TestCase):
+    """A Phone Link version without one column must blank that field, say so once, and parse everything else."""
+
+    def test_dropping_any_single_column_still_parses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pristine = pldemo.build(os.path.join(tmp, "device"))
+            cases = []
+            for db in sorted(os.listdir(pristine)):
+                c = sqlite3.connect(os.path.join(pristine, db))
+                for (table,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                    cases += [(db, table, r[1]) for r in c.execute('PRAGMA table_info("%s")' % table)]
+                c.close()
+            self.assertGreater(len(cases), 150)
+            failures = []
+            for n, (db, table, col) in enumerate(cases):
+                copy = os.path.join(tmp, "c%d" % n)
+                shutil.copytree(pristine, copy)
+                drop_column(os.path.join(copy, db), table, col)
+                del P.QUERY_ERRORS[:]
+                del P.MISSING_COLUMNS[:]
+                try:
+                    P.parse_all({x: os.path.join(copy, x) for x in os.listdir(copy)}, None, {}, 10)
+                except Exception as e:  # noqa: BLE001 - the point is that nothing may be raised
+                    failures.append("%s.%s.%s: %s: %s" % (db, table, col, type(e).__name__, e))
+                shutil.rmtree(copy, ignore_errors=True)
+            self.assertEqual(failures, [])
+
+    def test_missing_column_is_blank_and_warned_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dev = os.path.join(tmp, "dev")
+            pldemo.build(dev)
+            drop_column(os.path.join(dev, "calling.db"), "call_history", "call_type")
+            drop_column(os.path.join(dev, "calling.db"), "call_history", "start_time")   # also the ORDER BY column
+            out = os.path.join(tmp, "out")
+            rc, _ = run_main(["--input", dev, "--out", out])
+            self.assertEqual(rc, 0)
+            calls = read_csv_rows(os.path.join(out, "dev", "calls.csv"))
+            self.assertEqual(len(calls), 5)                       # every call is still there
+            self.assertEqual({r["start_utc"] for r in calls}, {""})
+            w = [x for x in read_acq(out, "dev")["warnings"] if "not in this copy" in x]
+            self.assertEqual(len(w), 1, w)
+            self.assertIn("call_history.call_type", w[0])
+            self.assertIn("call_history.start_time", w[0])
+            self.assertIn("calling.db", w[0])
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

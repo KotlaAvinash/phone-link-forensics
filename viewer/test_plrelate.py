@@ -407,6 +407,26 @@ class SchemaTolerance(unittest.TestCase):
         ev, g = build_edited(self, {"phone.db": ["UPDATE message SET subscription_id = NULL WHERE message_id = 3"]})
         self.assertFalse([r for r in g.views["R23"].rows if r["Problem"] == "message without SIM"])   # no key at all
 
+    def test_missing_table_is_stated(self):
+        ev, g = build_edited(self)
+        self.assertFalse([vid for vid, v in g.views.items() if "TABLE NOT IN THIS COPY" in v.basis])
+        ev, g = build_edited(self, {"phone.db": ["DROP TABLE subscription"]})
+        for vid in ("E_sims", "R10"):
+            self.assertIn("TABLE NOT IN THIS COPY", g.views[vid].basis, vid)
+            self.assertIn("phone.db subscription", g.views[vid].basis, vid)
+        self.assertEqual(g.views["E_sims"].rows, [])
+        self.assertNotIn("TABLE NOT IN THIS COPY", g.views["E_calls"].basis)
+
+    def test_missing_database_is_stated(self):
+        tmp = tempfile.mkdtemp(prefix="plrelate-test-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        src = pldemo.build(os.path.join(tmp, "device"))
+        os.remove(os.path.join(src, "photos.db"))
+        ev = R.Evidence(src)
+        self.addCleanup(ev.close)
+        g = R.build(ev)
+        self.assertIn("photos.db media (photos.db absent)", g.views["E_photos"].basis)
+
     def test_missing_contact_link_column(self):
         ev, g = build_edited(self, {"contacts.db": ["ALTER TABLE phonenumber DROP COLUMN contact_id"]})
         self.assertIn("phonenumber.contact_id", g.views["R13"].basis)
