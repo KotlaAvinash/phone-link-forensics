@@ -49,10 +49,10 @@ CHANNELS = ["Microsoft-Windows-Kernel-PnP/Configuration", "Microsoft-Windows-WPD
             "Microsoft-Windows-Bluetooth-BthLEPrepairing/Operational"]
 DEVICE_PREFIXES = ("USB\\", "SWD\\WPDBUSENUM", "BTHENUM\\", "BTHLE\\", "BTHLEDEVICE\\", "USBSTOR\\")
 EVENT_CAP = 10000   # newest events read per channel; older ones are not shown (stated in the C_events view)
-# Windows' ContainerID for "the PC itself" (not a device): zeros, then ffff, then twelve f, written in parts
-NULL_CONTAINER = "{%s-%s-%s-%s-%s}" % ("0" * 8, "0" * 4, "0" * 4, "ffff", "f" * 12)
-# Kernel-PnP event fields that name ANOTHER device than the event's own (DeviceInstanceId), written in parts
-PARENT_FIELD, MATCHING_FIELD = "Parent" + "DeviceInstanceId", "Matching" + "DeviceId"
+# Windows' ContainerID for "the PC itself" (not a device)
+NULL_CONTAINER = "{00000000-0000-0000-ffff-ffffffffffff}"
+# Kernel-PnP event fields that name ANOTHER device than the event's own (DeviceInstanceId)
+PARENT_FIELD, MATCHING_FIELD = "ParentDeviceInstanceId", "MatchingDeviceId"
 
 # [published] Bluetooth Core: class-of-device major classes
 BT_MAJOR = {0: "Miscellaneous", 1: "Computer", 2: "Phone", 3: "Network access point", 4: "Audio/Video",
@@ -282,8 +282,8 @@ def parse_events_xml(xml_text, problems=None):
     return out
 
 
-# Windows names this module matches, written in parts: the USB root hub id prefix and the HID USB driver
-ROOT_HUB_PREFIX, HID_USB_SERVICE = "USB\\ROOT_" + "HUB", "Hid" + "Usb"
+# Windows names this module matches: the USB root hub id prefix and the HID USB driver
+ROOT_HUB_PREFIX, HID_USB_SERVICE = "USB\\ROOT_HUB", "HidUsb"
 CONNECTED_ENUMERATORS = {"USB": "USB", "USBSTOR": "USB storage", "SWD\\WPDBUSENUM": "portable device (SWD-WPD)",
                          "BTHENUM": "Bluetooth", "BTHLE": "Bluetooth LE", "BTHLEDEVICE": "Bluetooth LE service"}
 
