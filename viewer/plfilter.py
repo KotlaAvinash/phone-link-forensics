@@ -12,7 +12,8 @@ only by unticking "(Blanks)".
     ColumnFilter(type, values, blanks, cond).match(value) / .describe(col)
     filter_indices(rows, [(col, ColumnFilter)], text, cols) / shown_indices(...)
     distinct(values, type), Checklist(items, blanks, ticked, keep_blanks, all_keys), group_days(keys)
-    preset_range(values, preset)         -> (from, to) relative to the NEWEST value, never to now
+    preset_range(values, preset)         -> (from, to) relative to the NEWEST plausible value, never to now
+    preset_info(values, preset), anchor(values)   ... and how many implausible future times were ignored
     visible(text)                        -> invisible and control characters shown as <U+200E>
 """
 import calendar
@@ -308,15 +309,51 @@ def newest(values):
     return best
 
 
-def preset_range(values, preset):
-    """(From, To) text for a quick choice such as 'Last 7 days of data': ending at the NEWEST value in the data
-    (evidence is often old - never relative to now). None when there is no time in values."""
-    top = newest(values)
+PLAUSIBLE_AHEAD = timedelta(days=1)       # a time later than now + this cannot have happened yet
+OUTLIER_GAP = timedelta(days=3653)        # all times in the future: one this far after the next is a far outlier
+
+
+def anchor(values, now=None):
+    """(the newest PLAUSIBLE time among values, how many times were ignored), or (None, 0) when there is none.
+    Plausible: not later than now + 1 day, so a single 9999-12-31 or a clock set years ahead cannot anchor the
+    quick ranges. When EVERY time is later than that (a synthetic case, a phone clock set ahead), only far
+    outliers are ignored: a time more than 10 years after the next newest one."""
+    times = [t for t in (parse_time(v) for v in values) if t is not None]
+    if not times:
+        return None, 0
+    cut = (now or datetime.now()) + PLAUSIBLE_AHEAD
+    ok = [t for t in times if t <= cut]
+    if ok:
+        return max(ok), len(times) - len(ok)
+    distinct = sorted(set(times))
+    while len(distinct) > 1 and distinct[-1] - distinct[-2] > OUTLIER_GAP:
+        distinct.pop()
+    top = distinct[-1]
+    return top, sum(t > top for t in times)
+
+
+def preset_info(values, preset, now=None):
+    """(From, To, ignored) text for a quick choice such as 'Last 7 days of data': ending at the NEWEST plausible
+    value in the data (evidence is often old - never relative to now; see anchor), with the number of implausible
+    future times that were ignored. None when there is no time in values."""
+    top, ignored = anchor(values, now)
     if top is None:
         return None
     top = top.replace(microsecond=0)
     fmt = "%Y-%m-%d %H:%M:%S"
-    return (top - PRESETS[preset]).strftime(fmt), top.strftime(fmt)
+    return (top - PRESETS[preset]).strftime(fmt), top.strftime(fmt), ignored
+
+
+def ignored_note(n):
+    """The hint after a quick range that skipped implausible dates ('' when none was skipped)."""
+    return "" if not n else (f"Quick range ends at the newest date in the data (ignoring {n:,} implausible future "
+                             f"date{'' if n == 1 else 's'})")
+
+
+def preset_range(values, preset, now=None):
+    """(From, To) of preset_info, or None."""
+    info = preset_info(values, preset, now)
+    return None if info is None else info[:2]
 
 
 # ---------------------------------------------------------------- column filters

@@ -2535,6 +2535,33 @@ class ViewerReview3Test(unittest.TestCase):
                 need = max(body.measure(F.cell_text(r.get(c))[:19]) for r in app.g.views[vid].rows) + app.px(8)
                 self.assertGreaterEqual(int(app.table.column(c, "width")), need, (vid, c))
 
+    # ---- 14 one far-future date does not anchor the quick ranges
+    def test_quick_ranges_ignore_implausible_future_dates(self):
+        from datetime import datetime
+        now = datetime(2026, 11, 13, 9, 0, 0)
+        vals = ["2025-03-01 10:00:00", "9999-12-31 23:59:59", "2025-02-27 08:00:00", "2027-06-01 00:00:00"]
+        self.assertEqual(F.preset_info(vals, "Last 7 days of data", now=now),
+                         ("2025-02-22 10:00:00", "2025-03-01 10:00:00", 2))
+        self.assertEqual(F.preset_range(vals, "Last 7 days of data", now=now)[1], "2025-03-01 10:00:00")
+        self.assertEqual(F.preset_info(["2026-11-14 01:00:00"], "Last 24 h of data", now=now)[2], 0)   # within a day
+        # every date later than tomorrow (a synthetic case, a phone clock set ahead): only far outliers are ignored
+        self.assertEqual(F.preset_info(["2030-01-01 00:00:00", "9999-12-31 23:59:59"], "Last 7 days of data",
+                                       now=now), ("2029-12-25 00:00:00", "2030-01-01 00:00:00", 1))
+        self.assertEqual(F.preset_info(["2030-01-01 00:00:00", "2031-01-01 00:00:00"], "Last 7 days of data",
+                                       now=now)[1:], ("2031-01-01 00:00:00", 0))
+        app = self.app
+        app.g.views["E_calls"].rows.append({"CallID": 98, "StartUTC": "9999-12-31 23:59:59", "Type": "Missed"})
+        app._types = {}
+        app.show("E_calls")
+        app.range_preset("Last 7 days of data")
+        self.assertTrue(app.range_to.get().startswith("2030-"), app.range_to.get())
+        self.assertIn("ignoring 1 implausible future date", app.range_err.cget("text"))
+        p = app.open_filter("StartUTC")
+        p.preset("Last 24 h of data")
+        self.assertTrue(p.b_var.get().startswith("2030-"))
+        self.assertIn("ignoring 1 implausible future date", p.error_lbl.cget("text"))
+        self.assertIn("implausible", V.HINTS["range"])
+
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
         app = self.app

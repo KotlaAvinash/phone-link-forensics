@@ -242,7 +242,8 @@ HINTS = {
              "and times. These are inferences, not stored links. With it off, the timeline and “People” views "
              "are hidden too.",
     "range": "Applies to every view's main time column (pick it under “Filter on”). Dates as YYYY-MM-DD or "
-             "YYYY-MM-DD HH:MM[:SS]; To is inclusive. Quick ranges end at the NEWEST time in the case, not now. "
+             "YYYY-MM-DD HH:MM[:SS]; To is inclusive. Quick ranges end at the NEWEST time in the case, not now (times later than "
+             "tomorrow are ignored as implausible, e.g. 9999-12-31). "
              "Times marked (no zone) cannot be put in time order with the others: they count as undated (kept "
              "or removed with “Keep undated rows”) and sort after the times that have a zone.",
     "keys": "Keyboard: Ctrl+Left / Ctrl+Right pick the column (named at the end of this line); Alt+Down, "
@@ -1553,13 +1554,16 @@ class Viewer(tk.Tk):
             return False
         values = (r.get(c) for vid, v in self.g.views.items() for c in [self.main_time_col(vid)] if c
                   for r in v.rows)
-        rng = F.preset_range(values, name)
+        rng = F.preset_info(values, name)
         if rng is None:
             self.range_err.config(text="No times in the case to count back from")
             return False
         self.range_from.set(rng[0])
         self.range_to.set(rng[1])
-        return self.apply_range()
+        ok = self.apply_range()
+        if ok and rng[2]:
+            self.range_err.config(text=F.ignored_note(rng[2]))
+        return ok
 
     def export_record(self, path):
         """The text of the sidecar <file>.filter.txt: which view, sort, filters and counts the CSV holds."""
@@ -2240,13 +2244,14 @@ class FilterPanel(tk.Frame):
 
     def preset(self, name):
         """A quick date range ending at the NEWEST time in this column (evidence is often old - never now)."""
-        rng = F.preset_range(self.all_values, name)
+        rng = F.preset_info(self.all_values, name)
         if rng is None:
             self.error_lbl.config(text="No dates in this column to count back from")
             return
         self.op_var.set("between")
         self.a_var.set(rng[0])
         self.b_var.set(rng[1])
+        self.error_lbl.config(text=F.ignored_note(rng[2]))
 
 
 class Hint:
