@@ -307,13 +307,15 @@ def value_key(v, ctype):
 
 class ColumnFilter:
     """values: the ticked value-list entries (None = all); blanks: keep blank cells (and, for a date condition,
-    cells that are not times); cond: a Condition or None. All parts must hold (AND)."""
+    cells that are not times); cond: a Condition or None. All parts must hold (AND). has_blanks: the column holds
+    blank cells, so the text of a value filter says whether they are kept."""
 
-    def __init__(self, ctype, values=None, blanks=True, cond=None):
+    def __init__(self, ctype, values=None, blanks=True, cond=None, has_blanks=False):
         self.ctype = ctype
         self.values = None if values is None else frozenset(values)
         self.blanks = blanks
         self.cond = cond
+        self.has_blanks = bool(has_blanks)
 
     @property
     def active(self):
@@ -341,7 +343,7 @@ class ColumnFilter:
             else:
                 parts.append(f"{'' if parts else col + ' '}is one of {len(vals)} ticked values")
         text = " and ".join(parts)
-        if self.cond is not None or not self.blanks:
+        if self.cond is not None or not self.blanks or (self.values is not None and self.has_blanks):
             note = "blanks kept" if self.blanks else "blanks removed"
             text = f"{text} ({note})" if text else f"{col}: {note}"
         return text

@@ -2028,7 +2028,8 @@ class FilterPanel(tk.Frame):
             self.app.close_panel()
             return True
         values, blanks = self.checklist.result()
-        self.app.apply_column_filter(self.vid, self.col, F.ColumnFilter(self.ctype, values, blanks, cond))
+        has_blanks = any(F.is_blank(x) for x in self.all_values)
+        self.app.apply_column_filter(self.vid, self.col, F.ColumnFilter(self.ctype, values, blanks, cond, has_blanks))
         self.app.close_panel()
         return True
 

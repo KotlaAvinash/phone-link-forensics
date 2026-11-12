@@ -2322,6 +2322,25 @@ class ViewerReview3Test(unittest.TestCase):
         p.ok()
         self.assertEqual(app.view_state("E_calls")["filters"]["Type"].values, frozenset({"Missed"}))
 
+    # ---- 6 "blanks kept" in a value filter's text
+    def test_value_filter_text_says_blanks_kept_when_the_column_has_blanks(self):
+        f = F.ColumnFilter(F.TEXT, values={"Incoming"}, blanks=True, has_blanks=True)
+        self.assertEqual(f.describe("T"), "T is one of 'Incoming' (blanks kept)")
+        f = F.ColumnFilter(F.TEXT, values={"Incoming"}, blanks=False, has_blanks=True)
+        self.assertEqual(f.describe("T"), "T is one of 'Incoming' (blanks removed)")
+        self.assertEqual(F.ColumnFilter(F.TEXT, values={"Incoming"}).describe("T"), "T is one of 'Incoming'")
+        app = self.app
+        app.show("E_calls")                   # ContactName is blank for call 4
+        p = app.open_filter("ContactName")
+        p.toggle_item("v:Bob Example")
+        p.ok()
+        self.assertIn("(blanks kept)", app.filter_lbl.cget("text"))
+        out = os.path.join(self.tmp.name, "b.csv")
+        with mock.patch.object(V.filedialog, "asksaveasfilename", lambda **k: out):
+            app.export()
+        with open(out + ".filter.txt", encoding="utf-8-sig") as fh:
+            self.assertIn("(blanks kept)", fh.read())
+
 
 if __name__ == "__main__":
     unittest.main()
