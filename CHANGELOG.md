@@ -12,7 +12,9 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - **Filtered export:** only the rows shown, in the order shown, plus a `.filter.txt` sidecar recording view, sort, filters and counts.
 - **Recovered notifications whose record header was overwritten,** from their surviving JSON (`json-carved (record header lost)`), with a TimeBasis column (JSON `postTime` is Unix ms, the table's `post_time` FILETIME). Rows of WAL page versions replaced by a later frame are decoded (`wal-superseded`).
 - **Checks:** messages whose SIM is missing from `subscription` are reported with the other orphans.
-- Invisible characters are shown as `⟨U+200E⟩` etc.; keyboard: Ctrl+F, Ctrl+E, Ctrl+Shift+F, Alt+Down, F6.
+- **Dark mode:** Light / Dark / Follow Windows (toolbar box, Ctrl+Shift+L, `--theme`), every text colour at WCAG AA contrast or better in both themes (the previous light colours failed 11 text/background pairs), a title bar that follows the theme, named fonts and row heights that scale on high-DPI displays. The choice is saved in `%APPDATA%\phone-link-forensics\viewer.json` (not in demo or screenshot runs).
+- Long Contents names are shortened with an ellipsis only when space is short, with the full name in a tooltip.
+- Invisible characters are shown as `⟨U+200E⟩` etc.; keyboard: Ctrl+F, Ctrl+E, Ctrl+Shift+F, Alt+Down, F6 / Shift+F6, Ctrl+Shift+L.
 
 ### Fixed
 
@@ -21,7 +23,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - **`secure_delete` is no longer reported as a property of the evidence.** `PRAGMA secure_delete` reports the examiner's SQLite connection, not the file. Recoverability is now judged from free pages that still hold bytes.
 - **Open folder re-reads the case.** Opening a second folder now re-reads the linked phones and this-PC views for the new case; a failed load leaves the previous case untouched, and the status line says when the live this-PC views are dropped.
 - **Pairing-folder times are stated as read.** A folder's creation time reflects the pairing only if timestamps were preserved; copy-time evidence is detected, and then no "linked" events, time matches or pairing order are claimed.
-- **Windows entries are never called phones.** `DeviceMetadataStorage.json` entries get a Kind (phone, Windows PC, unknown device, empty placeholder), and only phones are matched to a folder by time. The view is "Linked devices".
+- **Windows entries are never called phones.** `DeviceMetadataStorage.json` entries get a Kind (phone, Windows PC, unknown device, empty placeholder), and only phones are matched to a folder by time. The view is "Linked devices (phones and PCs)".
 - **Ambiguous time matches are not linked.** A match is made only when it is one-to-one; otherwise every candidate is listed as ambiguous.
 - **A live file changing during the copy no longer discards the section.** It is marked `n/a - source changed during copy`.
 - **The upstream cross-match test can no longer pass without running.** Without `--upstream-maps` it reports `SKIP`; a missing, empty or too small folder (under 50 maps) fails. A map missing a required key is a clean failure. New `tests/test_run_tests.py` tests the harness itself.
@@ -30,8 +32,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - **Sync counters are not row counts.** The `content_sequence` check compares the sync counter with the expected counter (*same / differs*) instead of calling a mismatch "INCOMPLETE".
 - **A live `-shm` no longer fails the load** with a false hash mismatch; it is hashed as copied and not verified against its constantly changing source (the `.db` and `-wal` still are).
 - **A truncated database no longer aborts the run**; the file is named in a warning. A column or table missing in some Phone Link version is stated, not fatal. Threads are not called "aged out" when the message read failed.
-- **Portable devices (MTP)** reads both registry sources; phones and drives listed only under `Windows Portable Devices\Devices` were dropped.
-- **Phones (summary)** has one row per physical device instead of one per interface.
+- **Portable devices (MTP: phones, cameras, drives)** reads both registry sources; phones and drives listed only under `Windows Portable Devices\Devices` were dropped.
+- **Phones connected (summary)** has one row per physical device instead of one per interface.
 - Pairing status wording agrees with its row count; connection events say which field matched (a parent-device match is labelled as a child device's event); first driver installs are categorised as connected device or internal hardware; times without a zone stay in the pairing history; streamed apps with no pairing folder are flagged; live views say when they were read.
 - The toolbar labels sit beside their own controls ("Device: 6" looked like a device number), and changing Nearby no longer re-copies the whole package.
 

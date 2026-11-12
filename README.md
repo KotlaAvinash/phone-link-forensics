@@ -41,7 +41,7 @@ The **Contents** list on the left uses plain names grouped by topic, with each v
 
 ![Linked phones](docs/images/01-linked-phones.png)
 
-**Notifications, live and deleted**: rows recovered from free pages are marked `deleted`. The packed JSON is unpacked into columns, and every linked row (group, conversation, older versions, chat messages, buttons, Windows toast, phone request) is listed on the right.
+**Notifications (live and recovered)**: rows recovered from free pages are marked `deleted`, and notifications rebuilt from JSON that survived its record header are marked `json-carved (record header lost)`. The packed JSON is unpacked into columns, and every linked row (group, conversation, older versions, chat messages, buttons, Windows toast, phone request) is listed on the right.
 
 ![Notifications](docs/images/02-notifications.png)
 
@@ -112,7 +112,7 @@ That folder holds `phone.db` (SMS, MMS, RCS), `calling.db` (calls), `contacts.db
 - **Secrets are never read.** Not read: the Bluetooth link keys, `PlatformEncryptedKeyStorage.json` and certificate bodies (only counted).
 - **Folder links are not followed.** When the Phone Link package is copied, a symlink or junction is skipped, not followed, and is listed in **Linked-phone copies and hashes** as `skipped - symlink or junction, not followed`.
 - **Read-only access to the live PC.** The cable / Bluetooth section reads the live registry and logs (event logs through `wevtutil`) and writes nothing to them.
-- **Running on a suspect PC is live response.** The viewer never writes to the source files it copies (reading them can still update their last-access time where Windows records it), but running it on the machine under examination still changes that machine: the temporary copies are written to its temp folder (by default on the system drive, where new files can overwrite unallocated space that may still hold deleted data), and starting Python (and `wevtutil` for the cable / Bluetooth section) leaves Prefetch and other execution traces. Prefer collecting the Phone Link package first and running the viewer with `--input` on that collected copy, on your own workstation. If you must run it on the suspect PC, redirect `TEMP` to an external drive as above and record what you ran and when.
+- **Running on a suspect PC is live response.** The viewer never writes to the source files it copies (reading them can still update their last-access time where Windows records it), but running it on the machine under examination still changes that machine: the temporary copies are written to its temp folder (by default on the system drive, where new files can overwrite unallocated space that may still hold deleted data), and starting Python (and `wevtutil` for the cable / Bluetooth section) leaves Prefetch and other execution traces. Picking a theme in the window also writes `%APPDATA%\phone-link-forensics\viewer.json` (never with `--demo` or `--screenshot`), and *Follow Windows* reads `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`. Prefer collecting the Phone Link package first and running the viewer with `--input` on that collected copy, on your own workstation. If you must run it on the suspect PC, redirect `TEMP` to an external drive as above and record what you ran and when.
 
 ### The window
 
@@ -121,7 +121,7 @@ That folder holds `phone.db` (SMS, MMS, RCS), `calling.db` (calls), `contacts.db
   - **Overview and checks**: the timeline, calls and texts per person, and the checks
   - **Phones linked to this PC** and **USB and Bluetooth on this PC**
   - **Advanced**: the SQLECmd map output, and the copies with their hashes
-  - Inside a topic the data comes first. **Rows that belong together**, **Links to other tables** and **Matched from other files (inferred)** are folded sub-headings. A greyed name has no rows.
+  - Inside a topic the data comes first. **Rows that belong together**, **Links to other tables**, **Matched from other files (inferred)** and, under *Phones linked to this PC*, **How these connect** are folded sub-headings; *Advanced* holds **SQLECmd map output** and **Copies and hashes**. A greyed name has no rows.
   - Opening a view puts its technical name (view code, database and table) in the banner, so nothing technical is hidden.
   - Counts are honest about what they count: a filtered view shows **112 of 686**, a check shows its problems (**2 issues / 28**), and a relation whose rows include unmatched ones shows **69 of 91 linked**.
 - **Middle: the table, with Excel-style column filters.** The banner above it says what the view is and where its data comes from. Every column heading has a **▾**: click it (or press **Alt+Down**) to open a panel like Excel's AutoFilter:
@@ -140,9 +140,10 @@ That folder holds `phone.db` (SMS, MMS, RCS), `calling.db` (calls), `contacts.db
   - **Show inferred matches**: off by default, because matches across database files are the tool's inferences (numbers matched on their last 10 digits, package names, times). With it off, the timeline and *calls and texts per person* views are hidden too, because they merge several databases.
   - **Nearby (min)**: the window (1-1440 minutes, default 5) for *events within N minutes of each other*. A wider window finds more pairs and more of them are coincidence; times are the phone's own clock.
   - **Dates in every view** (second row): **From / To** (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM[:SS]`), a quick range, **Filter on** (which time column of the current view), **Keep undated rows** (on by default) and **Clear all filters**. It applies to every view; the column filters apply on top.
+  - **Theme**: Light / Dark / Follow Windows (also **Ctrl+Shift+L**, or `--theme light|dark|system`). Every text colour meets WCAG AA contrast (4.5:1) in both themes, colours that carry meaning stay distinct, and the window title bar follows the theme. The choice is remembered (see *Running on a suspect PC*).
   - **Open folder…** opens another case: the linked-phone views follow the new folder, and the live USB / Bluetooth views are hidden (with a note saying why) unless the new folder is this PC's own Phone Link package or `--this-pc` was given.
   - **Open folder…** and **Export view (CSV)**. The export is written to a temporary file and moved into place, so a failure never leaves a half-written file. It is Excel-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a line break gets a leading `'` so Excel shows it as text, unless the whole cell is a plain number (`-5`, `3.14`, `+15550100`); a phone number written as `+1 555 0100` does get the `'`. Binary values are written as `<N bytes>`. **Export writes only the rows shown, in the order shown,** plus a `<file>.filter.txt` beside it that records the view, the sort, every filter and the row counts, so a filtered export can always be explained.
-- **Keys and mouse.** **Ctrl+F** filter box, **Ctrl+E** export, **Ctrl+Shift+F** clear all filters, **Alt+Down** (or Shift+F10 / the Menu key) opens the current column's filter panel, **F6** moves between Contents, the table, the linked rows and the selected row. Enter on a linked row jumps to it, like a double-click. The selected-row text is read-only (you can select and copy it). Unticking **Show inferred matches** removes the inferred views from the Contents list and the inferred lines from the linked rows, and leaves an inferred view if one is open.
+- **Keys and mouse.** **Ctrl+F** filter box, **Ctrl+E** export, **Ctrl+Shift+F** clear all filters, **Alt+Down** (or Shift+F10 / the Menu key) opens the current column's filter panel, **F6** / **Shift+F6** moves between Contents, the table, the linked rows and the selected row, **Ctrl+Shift+L** switches the theme. Enter on a linked row jumps to it, like a double-click. The selected-row text is read-only (you can select and copy it). Unticking **Show inferred matches** removes the inferred views from the Contents list and the inferred lines from the linked rows, and leaves an inferred view if one is open.
 
 Every link carries its basis, colour-coded:
 
@@ -161,9 +162,9 @@ Every phone that has ever been linked to the PC through Phone Link, **including 
 | View | Source | What it shows |
 |---|---|---|
 | Phone pairings | `LocalCache\Indexed\<GUID>\` | One row per pairing, in order of folder creation. The folder creation time is shown as read: it reflects the pairing only if the folders' timestamps were preserved when collected. If they look like copy times (a folder created after the files inside it were last modified, or after the folder itself was, all folders created within a second, or all created after every metadata time), a warning is shown and the folder times are not used as pairing times or for matching. Status: *data present* / *rows only in tables not counted here: …* (the tables are named, with their row counts; Phone Link's own bookkeeping tables are not counted) / *databases present, no rows* / *unreadable database* / *files present but no databases* / *folder only - its data was removed*. Also: databases left, row counts, first/last activity, SIM, apps streamed |
-| Linked devices | `LocalCache\DeviceMetadataStorage.json` | Per hardware ID: Kind (phone / this or another Windows PC / empty placeholder, from the OS name - the file also lists the PC itself), display name, manufacturer, model, OS version, Phone Link app version, capabilities, linked/enabled, registration and last-seen times. A hardware ID with no entries is shown as a placeholder row: its details were removed or never stored |
-| Trust relationships | `LocalCache\YppCryptoTrustRelationships` | Partner device, trust type, last access, key expiry, Microsoft account ID (MsaCid) |
-| Apps streamed per device | `LocalCache\Indexed\FullTrust\phone_apps.db` | `hosted_app_ids`: one row per app a phone streamed to the PC |
+| Linked devices (phones and PCs) | `LocalCache\DeviceMetadataStorage.json` | Per hardware ID: Kind (phone / this or another Windows PC / unknown device (OS not recorded) / other device / empty placeholder, from the OS name - the file also lists the PC itself), display name, manufacturer, model, OS version, Phone Link app version, capabilities, linked/enabled, registration and last-seen times. A hardware ID with no entries is shown as a placeholder row: its details were removed or never stored |
+| Trusted connections | `LocalCache\YppCryptoTrustRelationships` | Partner device, trust type, last access, key expiry, Microsoft account ID (MsaCid) |
+| Apps streamed to this PC | `LocalCache\Indexed\FullTrust\phone_apps.db` | `hosted_app_ids`: one row per app a phone streamed to the PC |
 | Pairing history | all of the above | Every linked-phone event in time order |
 | Linked-phone copies and hashes | the files above | Each package file copied, with its hash check; symlinks and junctions are listed as skipped |
 
@@ -178,15 +179,16 @@ Phones that reached the PC **without** Phone Link. This section reads the **live
 
 | View | What it shows |
 |---|---|
-| Phones (summary) | **One row per physical device** that looks like a phone, with the evidence: a phone driver on USB, the same ContainerID as a USB phone, Bluetooth class of device = Phone, or an MTP event 1005 naming the phone's make, model and OS version. Event 1005 also catches iPhones, which have no phone-specific driver. A phone seen through several interfaces (for example USB composite device, modem and MTP) is one row: **Interfaces** / **SeenAs** list each interface with its evidence, and the times are the earliest and latest across them. **PhysicalDevice** is the grouping key (ContainerID, else Bluetooth address); rows without one stay separate and say so. **Serial** is the USB serial number when there is one. An event-1005 row only knows make, model and OS, so it says *may be more than one phone* |
+| Phones connected (summary) | **One row per physical device** that looks like a phone, with the evidence: a phone driver on USB, the same ContainerID as a USB phone, Bluetooth class of device = Phone, or an MTP event 1005 naming the phone's make, model and OS version. Event 1005 also catches iPhones, which have no phone-specific driver. A phone seen through several interfaces (for example USB composite device, modem and MTP) is one row: **Interfaces** / **SeenAs** list each interface with its evidence, and the times are the earliest and latest across them. **PhysicalDevice** is the grouping key (ContainerID, else Bluetooth address); rows without one stay separate and say so. **Serial** is the USB serial number when there is one. An event-1005 row only knows make, model and OS, so it says *may be more than one phone* |
 | USB devices | Name, manufacturer, VID/PID, serial, driver, ContainerID, first install, key last-write time |
-| Portable devices (MTP) | Phones, cameras and drives as shown in *This PC*, from **both** `Enum\SWD\WPDBUSENUM` and `Windows Portable Devices\Devices` (deduplicated; **Source** says SWD / WPD-Devices / both). A phone known only by its USB instance in the second key is kept and linked to that USB device |
+| Portable devices (MTP: phones, cameras, drives) | Phones, cameras and drives as shown in *This PC*, from **both** `Enum\SWD\WPDBUSENUM` and `Windows Portable Devices\Devices` (deduplicated; **Source** says SWD / WPD-Devices / both). A phone known only by its USB instance in the second key is kept and linked to that USB device |
 | Bluetooth devices | Name, class of device, manufacturer ID, LMP version, VID/PID, **LastSeen**, **LastConnected** |
 | Bluetooth services | Each profile a device offered: Hands-Free, Phonebook Access, Message Access, A2DP, … |
-| Bluetooth LE | Low Energy devices and the GATT services they offered |
-| AutoPlay known devices | The label AutoPlay showed this Windows user |
-| First driver install | The earliest time each device ID was installed, across the current and rotated setup logs. **Category** separates connected devices (USB, USB storage, portable device, Bluetooth) from internal hardware (for example USB root hubs; a USB device using the HID driver is flagged as possibly built in) |
+| Bluetooth Low Energy devices | Low Energy devices and the GATT services they offered |
+| AutoPlay devices | The label AutoPlay showed this Windows user |
+| First driver install per device | The earliest time each device ID was installed, across the current and rotated setup logs. **Category** separates connected devices (USB, USB storage, portable device, Bluetooth) from internal hardware (for example USB root hubs; a USB device using the HID driver is flagged as possibly built in) |
 | Connection events | Event-log entries with Windows' own meaning for each ID. **MatchedField** says which event field matched the device: when it is `ParentDeviceInstanceId` the event is about a child device and the meaning says so. At most the newest 10,000 events of each log are read; the view's banner states the cap and says when it was reached |
+| Same device seen in several places | USB, MTP, Bluetooth and AutoPlay rows that share a ContainerID (Windows' own ID for one physical device), listed together |
 | Locations this account could not read | Registry keys, logs or event channels that were denied or failed to read, so you can tell an empty result from a failed one |
 
 Stored links between them:
@@ -268,10 +270,10 @@ Phone Link deletes a notification when it is dismissed, so the live table is oft
 
 | View | What it shows |
 |---|---|
-| notifications | Live rows **and carved deleted rows** (Source = deleted, with page and offset). A fixed set of 32 top-level keys of the `json` column is read into columns; any other key is not a column but stays visible in the raw JSON shown under the selected row. `flags`, `importance`, `priority` and the Android `key` (user / package / id / tag / uid) are decoded as the Android API defines them |
-| chat messages | `messages[]` with `senderNames[]`: who wrote each message inside one notification |
-| buttons | `notificationActions[]`; *InlineReply* means the notification could be answered from the PC |
-| notification_toastmappings, phone_requests | Live and carved rows |
+| Notifications (live and recovered) | Live rows **and carved deleted rows** (Source = deleted, with page and offset; notifications rebuilt from surviving JSON are marked `json-carved (record header lost)`). A fixed set of 32 top-level keys of the `json` column is read into columns; any other key is not a column but stays visible in the raw JSON shown under the selected row. `flags`, `importance`, `priority` and the Android `key` (user / package / id / tag / uid) are decoded as the Android API defines them |
+| Chat messages inside notifications | `messages[]` with `senderNames[]`: who wrote each message inside one notification |
+| Buttons on notifications | `notificationActions[]`; *InlineReply* means the notification could be answered from the PC |
+| Windows pop-ups (toasts), Requests sent from the phone | `notification_toastmappings` and `phone_requests`: live and carved rows |
 
 Relations inside the table:
 - **Same group** (`groupKey`; the summary row carries `FLAG_GROUP_SUMMARY`).

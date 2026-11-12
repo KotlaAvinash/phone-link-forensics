@@ -229,7 +229,7 @@ def multi(v):
 
 
 def clean_desc(v):
-    """'@oem12.inf,%device%;Galaxy S24' -> 'Galaxy S24' (the text after the last ';')."""
+    """'@oem12.inf,%device%;Example Phone' -> 'Example Phone' (the text after the last ';')."""
     s = multi(v)
     return s.rsplit(";", 1)[-1] if s.startswith("@") else s
 

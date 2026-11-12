@@ -1,6 +1,6 @@
 # How the Phone Link maps were tested
 
-Everything in this repository was tested on **synthetic data only**. The maps were also checked against a real Windows 11 system's Phone Link databases, but no value, count or identifier from that system is published here. Only the method and the pass/fail outcome are.
+Everything in this repository was tested on **synthetic data only**. The maps were also checked against a real Windows 11 system's Phone Link databases, but no identifier from that system is published here; a few aggregate measurements (for example how a sync counter changed) are quoted in the README to explain behaviour. Otherwise only the method and the pass/fail outcome are.
 
 ## 1. Answer-key tests (`tests/run_tests.py`)
 
