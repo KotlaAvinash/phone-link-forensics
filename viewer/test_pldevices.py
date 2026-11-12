@@ -652,6 +652,26 @@ class LastSeenInHistory(unittest.TestCase):
         seen = [r["TimeUTC"] for r in g.views["PR4"].rows if r["Event"] == "phone last seen (metadata)"]
         self.assertEqual(seen, ["2026-09-21 11:47:49"])
 
+    def test_times_without_a_zone_are_kept_as_no_zone_rows(self):
+        meta = {"DeviceMetadatas": {"HW1": [{"Metadata": {
+            "Id": "id-1", "RegistrationTime": "2026-09-21T17:00:00",
+            "LastSeenTime": "2026-09-21T17:17:49+05:30", "Metadata": {"DisplayName": "P1", "OsName": "Android"}}}]}}
+        trust = {"TrustedClients": {"t1": {"PartnerClientId": "pre_id-1", "RelationshipLastAccessTime": "2026-09-22T08:00:00"}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, meta=meta, trust=trust)
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+        rows = g.views["PR4"].rows
+        reg = [r for r in rows if r["Event"].startswith("phone registered")]
+        self.assertEqual([r["TimeUTC"] for r in reg], ["2026-09-21 17:00:00 (no zone)"])
+        self.assertIn("no zone", reg[0]["Event"])
+        last = [r for r in rows if r["Event"].startswith("trust relationship last used")]
+        self.assertEqual([r["TimeUTC"] for r in last], ["2026-09-22 08:00:00 (no zone)"])
+        # zoned rows first, in time order; the zone-less ones after them (they cannot be placed in UTC order)
+        self.assertEqual(rows[0]["TimeUTC"], "2026-09-21 11:47:49")
+        self.assertTrue(all("(no zone)" in r["TimeUTC"] for r in rows[1:]), rows)
+
 
 class LinkDetection(unittest.TestCase):
     def test_reparse_point_attribute_is_a_link_even_without_isjunction(self):

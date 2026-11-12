@@ -638,24 +638,33 @@ def _build(pc, g, View, ts_seconds, iso):
         "FullTrust phone_apps.db hosted_app_ids.device_id equal to the pairing folder's GUID",
         ["Pairing", "StreamedApps", "Basis"], rel, entity=False)
 
-    events = []
+    events = []   # (epoch or None, what, detail, entity, the time as shown in its own view)
     for r in folder_rows if trusted else []:   # a copy time is not a pairing event
         events.append((r["_created"], "pairing folder created (the phone was linked then, if the folder times were "
-                                      "preserved)", g.label[r["_e"]], r["_e"]))
+                                      "preserved)", g.label[r["_e"]], r["_e"], ""))
     for m in meta_rows:
         noun = KIND_NOUN.get(m.get("_kind"), "device")
         if m.get("RegisteredUTC"):
-            events.append((m.get("_reg_ts"), f"{noun} registered (metadata)", g.label[m["_e"]], m["_e"]))
+            events.append((m.get("_reg_ts"), f"{noun} registered (metadata)", g.label[m["_e"]], m["_e"],
+                           m["RegisteredUTC"]))
         if m.get("LastSeenUTC"):
-            events.append((m.get("_seen_ts"), f"{noun} last seen (metadata)", g.label[m["_e"]], m["_e"]))
+            events.append((m.get("_seen_ts"), f"{noun} last seen (metadata)", g.label[m["_e"]], m["_e"],
+                           m["LastSeenUTC"]))
     for t in trust_rows:
-        events.append((g.time.get(t["_e"]), "trust relationship last used", g.label[t["_e"]], t["_e"]))
-    rows = [{"_e": e, "TimeUTC": _utc_ts(ts) if ts is not None else "", "Event": what, "Detail": detail}
-            for ts, what, detail, e in sorted((x for x in events if x[0] is not None), key=lambda x: x[0])]
+        events.append((g.time.get(t["_e"]), "trust relationship last used", g.label[t["_e"]], t["_e"],
+                       t.get("LastAccessUTC") or ""))
+    rows = [{"_e": e, "TimeUTC": _utc_ts(ts), "Event": what, "Detail": detail}
+            for ts, what, detail, e, _ in sorted((x for x in events if x[0] is not None), key=lambda x: x[0])]
+    # a time written without a zone (or unreadable) has no UTC instant: shown as written, after the ordered rows
+    rows += [{"_e": e, "TimeUTC": shown, "Detail": detail,
+              "Event": what + (" - time has no zone, not placed in time order" if shown.endswith("(no zone)")
+                               else " - not a readable time, not placed in time order")}
+             for ts, what, detail, e, shown in events if ts is None and shown]
     add("PR4", "Pairing history (all linked-phone events in time order)",
         (copy_warn + ". Folder creations are left out of the history. " if copy_warn else "") +
         f"folder creations ({FOLDER_TIME_CAVEAT}), registrations, last-seen and trust times from all the sources "
-        f"above",
+        f"above. Times written without a zone are listed after the others as '(no zone)' - they cannot be put in "
+        f"UTC order",
         ["TimeUTC", "Event", "Detail"], rows, entity=False)
 
     v = View("PC_copies", "Linked phones - copies and hashes", "provenance",
