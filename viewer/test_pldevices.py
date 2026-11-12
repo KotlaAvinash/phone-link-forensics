@@ -516,6 +516,66 @@ class AmbiguousTimeMatch(unittest.TestCase):
         self.assertTrue(all(r["Basis"].startswith("inferred") for r in g.views["PR3"].rows))
 
 
+class StoredFolderLink(unittest.TestCase):
+    """DeviceMetadataStorage.json Metadata.Id is the pairing folder's GUID: a stored link, not a time guess."""
+
+    def test_metadata_id_equal_to_a_folder_guid_is_a_stored_link(self):
+        # registered five days before the folder was created: no time match could make this link
+        # (the PC entry registered near the folders keeps the folder times trusted - see _time_check, check 4)
+        meta = {"DeviceMetadatas": {"HW1": [entry("{%s}" % G[0].upper(), "P1", "Android", T0 - 5 * 86400)],
+                                    "HWPC": [entry("pc-1", "MYPC", "Windows", T0 - 30)]}}
+        g = build_with_folder_times(meta, {G[0]: T0, G[1]: T0 + 86400})
+        self.assertNotIn("WARNING", g.views["PR3"].basis)
+        self.assertEqual([b for a, b in pr3_links(g)], [("pairing", G[0])])
+        rows = g.views["PR3"].rows
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Basis"], "stored: Metadata.Id = pairing folder GUID")
+        basis = g.views["PR3"].basis
+        self.assertNotIn("keeps no folder GUID", basis)
+        self.assertIn("Metadata.Id", basis)
+        self.assertIn("fallback", basis)
+        self.assertIn("Metadata.Id", g.views["PC_phones"].basis)
+
+    def test_stored_link_survives_copy_time_folder_dates(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry(G[1], "P1", "Android", T0)],
+                                    "HW2": [entry("ph-2", "P2", "Android", T0 - 60)]}}
+        g = build_with_folder_times(meta, {G[0]: T0 + 0.1, G[1]: T0 + 0.2})   # created together: copy times
+        self.assertIn("look like the time the evidence was copied", g.views["PR3"].basis)
+        self.assertEqual(sorted((a[1], b[1]) for a, b in pr3_links(g)), [(G[1], G[1])])
+        row = g.views["PR3"].rows[0]
+        self.assertTrue(row["Basis"].startswith("stored"), row)
+        self.assertEqual(row["GapSeconds"], "")            # a copy time gives no gap
+
+    def test_time_fallback_only_for_entries_without_a_folder_id_and_only_free_folders(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry(G[0], "P1", "Android", T0 + 86400 - 60)],   # stored: G[0]
+                                    "HW2": [entry("ph-2", "P2", "Android", T0 - 60)],          # near G[0] only
+                                    "HW3": [entry("ph-3", "P3", "Android", T0 + 2 * 86400 - 60)]}}
+        g = build_with_folder_times(meta, {G[0]: T0, G[1]: T0 + 86400, G[2]: T0 + 2 * 86400})
+        # P1 registered 60 s before G[1] but its Id names G[0]: never matched to G[1] by time
+        # P2's only nearby folder is G[0], which the stored link already explains: no match
+        self.assertEqual(sorted((a[1], b[1]) for a, b in pr3_links(g)), [(G[0], G[0]), ("ph-3", G[2])])
+        rows = {r["Phone"]: r for r in g.views["PR3"].rows}
+        self.assertEqual(set(rows), {"phone P1", "phone P3"})
+        self.assertTrue(rows["phone P3"]["Basis"].startswith("inferred by time (fallback"), rows)
+        self.assertIn("not a GUID", rows["phone P3"]["Basis"])
+
+    def test_guid_id_naming_no_folder_falls_back_to_time_and_says_so(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry(G[5], "P1", "Android", T0 - 60)]}}
+        g = build_with_folder_times(meta, {G[0]: T0})
+        self.assertEqual(sorted((a[1], b[1]) for a, b in pr3_links(g)), [(G[5], G[0])])
+        self.assertIn("names no pairing folder", g.views["PR3"].rows[0]["Basis"])
+
+    def test_history_names_the_phone_of_a_stored_folder(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry(G[0], "P1", "Android", T0 - 60)]}}
+        g = build_with_folder_times(meta, {G[0]: T0, G[1]: T0 + 86400})
+        made =[r["Detail"] for r in g.views["PR4"].rows if r["Event"].startswith("pairing folder created")]
+        self.assertEqual(len(made), 2)
+        self.assertTrue(made[0].startswith("pairing #1"), made)      # G[0], created first
+        self.assertIn("phone P1", made[0])
+        self.assertIn("Metadata.Id", made[0])
+        self.assertIn("no metadata entry has this folder's GUID", made[1])
+
+
 class SourceChangesDuringCopy(unittest.TestCase):
     """A live package keeps writing: one moving file must not throw away the whole linked-phones section."""
     META = {"DeviceMetadatas": {"HW1": [{"IsLinked": True, "Metadata": {"Id": "id-1", "Metadata": {

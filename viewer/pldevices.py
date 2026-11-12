@@ -10,8 +10,10 @@ Sources (all under ...\\Microsoft.YourPhone_8wekyb3d8bbwe\\LocalCache\\):
                                    its GUID and times) stays - evidence of a pairing even with no data.
   DeviceMetadataStorage.json       phone details per hardware ID: display name, manufacturer, model,
                                    Android version, Phone Link client version, capabilities, linked,
-                                   registration and last-seen times. A hardware ID with no entry is a
-                                   phone whose details were removed.
+                                   registration and last-seen times. Metadata.Id is the pairing folder's
+                                   GUID (a stored link; Phone Link removes the entry when the phone is
+                                   unlinked). A hardware ID with no entry is a phone whose details were
+                                   removed.
   YppCryptoTrustRelationships      trust relationships with partner devices: partner id, trust type,
                                    last access, key expiry, Microsoft account id (MsaCid).
   Indexed\\FullTrust\\phone_apps.db  hosted_app_ids: apps streamed to the PC, per device_id.
@@ -40,7 +42,8 @@ META, TRUST, FULLTRUST = "DeviceMetadataStorage.json", "YppCryptoTrustRelationsh
 DATA_TABLES = {"calling.db": ["call_history"], "phone.db": ["message", "conversation", "mms"],
                "contacts.db": ["contact"], "photos.db": ["media"], "phoneapps.db": ["phone_apps"],
                "notifications.db": ["notifications"], "sharedcontent.db": ["sharedcontent", "shareduri"]}
-INFER_WINDOW_S = 600   # metadata registration this close before a folder's creation -> inferred same pairing
+INFER_WINDOW_S = 600   # fallback only: registration this close before a folder's creation -> inferred same pairing
+STORED_PR3 = "stored: Metadata.Id = pairing folder GUID"
 SNAPSHOT_TRIES = 3     # copies of a file whose source keeps changing, before it is kept and flagged
 UNSTABLE = "n/a - source changed during copy"
 
@@ -558,8 +561,9 @@ def _build(pc, g, View, ts_seconds, iso):
         add("PC_phones", "Linked devices (DeviceMetadataStorage.json)",
             "per hardware ID: what kind of device each entry is (Kind, from its OS name: phone / this or another "
             "Windows PC / empty placeholder), its own name, make, model, OS and Phone Link app; registration and "
-            "last-seen times. Only phones are matched to pairing folders. Certificate bodies are not shown, only "
-            "their count", META_COLS, meta_rows)
+            "last-seen times. MetadataID (Metadata.Id) equal to a pairing folder's GUID is a stored link to that "
+            "folder; only phones are ever matched to a folder by time, as a fallback. Certificate bodies are not "
+            "shown, only their count", META_COLS, meta_rows)
 
     # ---------- trust relationships
     trust_rows, trust_err = [], None
@@ -611,24 +615,53 @@ def _build(pc, g, View, ts_seconds, iso):
             g.link("PR2", r["_e"], se, "Stored link: hosted_app_ids.device_id is this pairing folder's name")
 
     # ---------- relations
-    # A phone (never a PC or an unknown device) is a candidate for every folder created within the window after
-    # it registered. Only a one-to-one pair - the phone has one candidate folder and that folder one candidate
-    # phone - is linked. Anything else is listed as ambiguous and not linked. Copy-time folder dates match nothing.
-    phones = [m for m in meta_rows if trusted and "_e" in m and m.get("_kind") == "phone" and m.get("_reg_ts") is not None]
-    cands = [(m, [r for r in folder_rows if 0 <= r["_created"] - m["_reg_ts"] <= INFER_WINDOW_S]) for m in phones]
+    # Stored link: DeviceMetadataStorage Metadata.Id is the pairing folder's GUID (seen on a real package: the Id
+    # was exactly the folder name, and Phone Link removed the entry when the phone was unlinked). Case and braces
+    # are ignored (norm_id). It does not depend on folder times, so it holds on a copy too.
+    folder_by_id = {norm_id(r["DeviceFolder"]): r for r in folder_rows}
+    rel, stored_folder, stored_entries = [], {}, set()
+    for m in meta_rows:
+        r = folder_by_id.get(norm_id(m.get("MetadataID"))) if "_e" in m and m.get("MetadataID") else None
+        if r is None:
+            continue
+        stored_entries.add(m["_e"])
+        stored_folder.setdefault(r["DeviceFolder"], []).append(m["_e"])
+        g.link("PR3", m["_e"], r["_e"], "Stored link: Metadata.Id is this pairing folder's GUID")
+        rel.append({"_e": m["_e"], "Phone": g.label[m["_e"]], "Pairing": g.label[r["_e"]],
+                    "RegisteredUTC": m["RegisteredUTC"], "FolderCreatedUTC": r["FolderCreatedUTC"],
+                    "GapSeconds": int(r["_created"] - m["_reg_ts"]) if trusted and m.get("_reg_ts") is not None else "",
+                    "Basis": STORED_PR3})
+
+    # Time fallback, only for a phone (never a PC or an unknown device) whose Id is not a GUID or names no folder
+    # here, and only to a folder no stored link claims. The phone is a candidate for every such folder created
+    # within the window after it registered. Only a one-to-one pair - the phone has one candidate folder and that
+    # folder one candidate phone - is linked; anything else is listed as ambiguous and not linked. Copy-time
+    # folder dates match nothing.
+    def no_folder_id(m):
+        mid = m.get("MetadataID")
+        if not mid:
+            return "no Metadata.Id"
+        if not GUID.match(norm_id(mid)):
+            return "Metadata.Id is not a GUID"
+        return "Metadata.Id is a GUID that names no pairing folder here"
+
+    free = [r for r in folder_rows if r["DeviceFolder"] not in stored_folder]
+    phones = [m for m in meta_rows if trusted and "_e" in m and m.get("_kind") == "phone"
+              and m.get("_reg_ts") is not None and m["_e"] not in stored_entries]
+    cands = [(m, [r for r in free if 0 <= r["_created"] - m["_reg_ts"] <= INFER_WINDOW_S]) for m in phones]
     per_folder = {}
     for m, near in cands:
         for r in near:
             per_folder[r["DeviceFolder"]] = per_folder.get(r["DeviceFolder"], 0) + 1
-    rel = []
     for m, near in cands:
         reg = m["_reg_ts"]
         for r in sorted(near, key=lambda r: r["_created"]):
             gap = int(r["_created"] - reg)
             n_phones = per_folder[r["DeviceFolder"]]
             if len(near) == 1 and n_phones == 1:
-                g.link("PR3", m["_e"], r["_e"], f"Inferred by time: folder created {gap} s after the phone registered")
-                basis = "inferred (time) - no stored ID links them"
+                g.link("PR3", m["_e"], r["_e"], f"Inferred by time (fallback - {no_folder_id(m)}): folder created "
+                                                f"{gap} s after the phone registered")
+                basis = f"inferred by time (fallback: {no_folder_id(m)}) - not a stored link"
             else:
                 why = [f"{len(near)} folders were created within {INFER_WINDOW_S // 60} min after this phone "
                        f"registered"] if len(near) > 1 else []
@@ -638,12 +671,15 @@ def _build(pc, g, View, ts_seconds, iso):
             rel.append({"_e": m["_e"], "Phone": g.label[m["_e"]], "Pairing": g.label[r["_e"]],
                         "RegisteredUTC": m["RegisteredUTC"], "FolderCreatedUTC": r["FolderCreatedUTC"],
                         "GapSeconds": gap, "Basis": basis})
-    add("PR3", "Phone details -> pairing folder (inferred by time)",
-        (copy_warn + ". Nothing is matched by time. " if copy_warn else "") +
-        f"the metadata keeps no folder GUID, so a phone is matched to a folder created within "
-        f"{INFER_WINDOW_S // 60} minutes after its registration time ({FOLDER_TIME_CAVEAT}). Only phones are matched, "
-        f"and only one-to-one: when a phone has several such folders or a folder several such phones, every candidate "
-        f"is listed as AMBIGUOUS and none is linked. An inference, not a stored link",
+    add("PR3", "Device details -> pairing folder (stored Metadata.Id; time fallback)",
+        (copy_warn + ". Nothing is matched by time; stored links still hold. " if copy_warn else "") +
+        "stored link: DeviceMetadataStorage.json Metadata.Id equals the pairing folder's GUID (case and braces "
+        "ignored); Phone Link removes the entry when the phone is unlinked, so a folder that no Id names is a pairing "
+        "whose details were removed. Fallback, only for a phone whose Id is not a GUID or names no folder here: it is "
+        f"matched to a folder that no stored link claims, created within {INFER_WINDOW_S // 60} minutes after its "
+        f"registration time ({FOLDER_TIME_CAVEAT}). The fallback matches only phones, and only one-to-one: when a "
+        f"phone has several such folders or a folder several such phones, every candidate is listed as AMBIGUOUS and "
+        f"none is linked. Basis says which each row is - the fallback is an inference, not a stored link",
         ["Phone", "Pairing", "RegisteredUTC", "FolderCreatedUTC", "GapSeconds", "Basis"], rel, entity=False)
 
     rel = [{"_e": e, "Device": g.label[e], "TrustRelationship": g.label[t], "Basis": "stored: PartnerClientId contains metadata Id"}
@@ -661,8 +697,13 @@ def _build(pc, g, View, ts_seconds, iso):
 
     events = []   # (epoch or None, what, detail, entity, the time as shown in its own view)
     for r in folder_rows if trusted else []:   # a copy time is not a pairing event
+        whose = stored_folder.get(r["DeviceFolder"])
+        detail = g.label[r["_e"]] + ("; " + ", ".join(g.label[e] for e in whose) + " (stored link: Metadata.Id = "
+                                     "this folder's GUID)" if whose else
+                                     "; no metadata entry has this folder's GUID as its Id (Phone Link removes the "
+                                     "entry when the phone is unlinked)")
         events.append((r["_created"], "pairing folder created (the phone was linked then, if the folder times were "
-                                      "preserved)", g.label[r["_e"]], r["_e"], ""))
+                                      "preserved)", detail, r["_e"], ""))
     for m in meta_rows:
         noun = KIND_NOUN.get(m.get("_kind"), "device")
         if m.get("RegisteredUTC"):
@@ -684,7 +725,8 @@ def _build(pc, g, View, ts_seconds, iso):
     add("PR4", "Pairing history (all linked-phone events in time order)",
         (copy_warn + ". Folder creations are left out of the history. " if copy_warn else "") +
         f"folder creations ({FOLDER_TIME_CAVEAT}), registrations, last-seen and trust times from all the sources "
-        f"above. Times written without a zone are listed after the others as '(no zone)' - they cannot be put in "
+        f"above. A folder creation names the device whose Metadata.Id is that folder's GUID (stored link), or says "
+        f"no entry has it; time-fallback matches are not used here. Times written without a zone are listed after the others as '(no zone)' - they cannot be put in "
         f"UTC order",
         ["TimeUTC", "Event", "Detail"], rows, entity=False)
 
