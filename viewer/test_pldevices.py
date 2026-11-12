@@ -689,6 +689,26 @@ class MetadataEntriesWithoutId(unittest.TestCase):
         self.assertEqual({g.home[r["_e"]] for r in rows}, {("PC_phones", 0), ("PC_phones", 1)})
 
 
+class StreamedAppsWithoutAPairingFolder(unittest.TestCase):
+    def test_unmatched_device_id_is_flagged(self):
+        apps = [("CREATE TABLE hosted_app_ids (row_id INTEGER, device_id TEXT, package_id TEXT)",
+                 [f"INSERT INTO hosted_app_ids VALUES (1, '{G[0].upper()}', 'com.example.one')",
+                  f"INSERT INTO hosted_app_ids VALUES (2, '{G[6]}', 'com.example.two')"])]
+        folders = [(G[0], {"System/Database/phone.db": [("CREATE TABLE message (id INTEGER)", [])]}),
+                   ("FullTrust", {"phone_apps.db": apps})]
+        with tempfile.TemporaryDirectory() as tmp:
+            lc = make_pkg(tmp, folders=folders)
+            g = R.Graph()
+            _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+        v = g.views["PC_streamed"]
+        self.assertIn("PairingFolder", v.cols)
+        got = {r["package_id"]: r["PairingFolder"] for r in v.rows}
+        self.assertTrue(got["com.example.one"].startswith("pairing #1"), got)
+        self.assertTrue(got["com.example.two"].startswith("NO pairing folder"), got)
+        self.assertIn("NO pairing folder", v.basis)
+
+
 class LinkDetection(unittest.TestCase):
     def test_reparse_point_attribute_is_a_link_even_without_isjunction(self):
         # Python 3.8-3.11 has no os.path.isjunction and lstat does not flag junctions: the attribute must

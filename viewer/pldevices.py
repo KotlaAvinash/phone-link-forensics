@@ -585,8 +585,14 @@ def _build(pc, g, View, ts_seconds, iso):
         add("PC_streamed", "Apps streamed to this PC, per device (FullTrust phone_apps.db)", streamed_err, ["Error"],
             [{"Error": streamed_err}])
     else:
+        folder_of = {r["DeviceFolder"].lower(): r for r in folder_rows}
+        for s in streamed:
+            f = folder_of.get(str(s.get("device_id") or "").lower())
+            s["PairingFolder"] = (f"pairing #{f['#']} - folder {f['DeviceFolder']}" if f else
+                                  "NO pairing folder with this GUID (the folder is gone, or the id is not a folder)")
         add("PC_streamed", "Apps streamed to this PC, per device (FullTrust phone_apps.db)",
-            "hosted_app_ids: one row per app a phone streamed to the PC; device_id is the pairing folder's GUID",
+            "hosted_app_ids: one row per app a phone streamed to the PC; device_id is the pairing folder's GUID. "
+            "PairingFolder names that folder, or says NO pairing folder when no folder under Indexed has that GUID",
             list(streamed[0].keys())[1:] if streamed else ["device_id"], streamed)
     for r in folder_rows:
         for se in by_dev.get(r["DeviceFolder"].lower(), []):
