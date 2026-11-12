@@ -391,6 +391,8 @@ class Viewer(tk.Tk):
         self.pc = None
         self.leftovers = []
         self._status_main = ""
+        self.save_note = ""       # a theme choice that could not be saved (shown on the status line)
+        self._markers = {}        # copy folder -> its open in-use marker (see mark_in_use)
         self._last_min = min(NEARBY_MAX, max(NEARBY_MIN, int(window_min)))   # last valid Nearby value
         self.built_min = self._last_min      # the window the current relations were built with
         self.window_min = tk.StringVar(self, value=str(self._last_min))   # text: the box can hold anything while typing
@@ -480,7 +482,10 @@ class Viewer(tk.Tk):
         """A theme picked in the window (toolbar or Ctrl+Shift+L): apply it and remember it, when allowed."""
         self.apply_theme(mode)
         if self.settings_path:
-            T.save_mode(self.theme_mode, self.settings_path)
+            saved = T.save_mode(self.theme_mode, self.settings_path)
+            self.save_note = "" if saved else (f"WARNING: the theme choice could not be saved to "
+                                               f"{self._shown(self.settings_path)} - it applies to this window only")
+            self._status(self._status_main)
 
     def cycle_theme(self):
         self.set_theme_mode(T.next_mode(self.theme_mode))
@@ -747,6 +752,7 @@ class Viewer(tk.Tk):
             self.dev_combo["values"] = [lbl for lbl, _ in devices]
             self.cur_vid = None
         self.dev_idx = i
+        self._mark_copies()
         self.close_panel()
         self.vstate, self.range_cols, self._types = {}, {}, {}   # filters belong to the data they were set on
         self.dev_combo.current(i)
@@ -847,6 +853,8 @@ class Viewer(tk.Tk):
         """The status bar. Copy folders that could not be removed and a snapshot warning from the evidence copy
         are always kept on it."""
         self._status_main = text
+        if self.save_note:
+            text += f"  |  {self.save_note}"
         left = self._leftover_paths()
         if left:
             text += (f"  |  WARNING: {len(left)} temporary copy folder(s) could not be removed (a file is still in "
@@ -855,7 +863,7 @@ class Viewer(tk.Tk):
         if note:
             text += f"  |  WARNING: {note}"
         self.status.config(text=self._scrub(text))
-        self.themer.set(self.status, foreground="warn" if warn or note or left else "status")
+        self.themer.set(self.status, foreground="warn" if warn or note or left or self.save_note else "status")
 
     def _leftover_paths(self):
         """Copy folders this viewer, or plrelate (LEFT_BEHIND), could not remove and that are still there."""
@@ -879,6 +887,17 @@ class Viewer(tk.Tk):
             chars -= 1
             text = elide_middle(self.src_full, chars)
         self.src_lbl.config(text=text)
+
+    def _mark_copies(self):
+        """Hold an in-use marker for each copy folder this window uses (so another viewer's stale_copies never
+        calls them leftovers), and release the markers of copies it no longer uses."""
+        want = {o.work for o in (self.ev, self.pc) if o is not None and getattr(o, "work", None)}
+        for path in [p for p in self._markers if p not in want]:
+            release_in_use(self._markers.pop(path))
+        for path in want - set(self._markers):
+            marker = mark_in_use(path)
+            if marker is not None:
+                self._markers[path] = marker
 
     def _remember(self, leftover):
         if leftover:
@@ -1737,6 +1756,13 @@ class Viewer(tk.Tk):
         except Exception as e:
             side_note, warn = f"; WARNING: the filter record {os.path.basename(side)} could not be written: " \
                                     f"{self._why(e)}", True
+            if os.path.exists(side):     # an older record of another export must not sit next to this CSV
+                try:
+                    os.remove(side)
+                    side_note += " - the older file of that name was removed, so it cannot be mistaken for this one"
+                except OSError as e2:
+                    side_note += (f" - an OLDER file of that name is still there and does NOT describe this CSV: "
+                                  f"delete it ({self._why(e2)})")
         self._status(f"Exported {len(self.cur_rows):,} rows to {name} - Excel-safe: a cell that starts with = + - @ "
                      f"(or a tab or line break) gets a leading ' so Excel shows it as text, unless the whole cell is a "
                      f"plain number such as -5, 3.14 or +15550100; bytes are written as <N bytes> "
@@ -1761,6 +1787,8 @@ class Viewer(tk.Tk):
             self._remember(self.ev.close())
         if self.pc:
             self._remember(self.pc.close())
+        self.ev = self.pc = None
+        self._mark_copies()          # releases every marker
         left = self._leftover_paths()
         if left and warn:
             messagebox.showwarning("Copies not removed", "These temporary copies of the evidence could not be "
@@ -2370,17 +2398,108 @@ class TreeTip:
         self.iid = None
         self.hide_tip()
 
-def stale_copies(exclude=()):
-    """Copy folders left in the temp folder by earlier runs that still hold databases."""
-    tmp = tempfile.gettempdir()
+# ---------------------------------------------------------------- copies in use, copies left over
+# While a viewer runs it keeps a marker file "<copy folder>.inuse" open and locked next to each copy folder it uses.
+# A folder whose marker is still locked belongs to a running viewer; a marker nobody holds (its viewer was killed)
+# is removed and the folder counts as left over. Only names made by tempfile.mkdtemp for the copies
+# ("plrelate-" / "pldevices-" and 8 random characters) are counted: test folders (plrelate-test-..., pltest-...)
+# never are.
+INUSE_SUFFIX = ".inuse"
+COPY_NAME = re.compile(r"(plrelate|pldevices)-[a-z0-9_]{8}")
+
+
+def _lock(f):
+    if os.name == "nt":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    else:  # pragma: no cover
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(f):
+    if os.name == "nt":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    else:  # pragma: no cover
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def mark_in_use(folder):
+    """Create and lock "<folder>.inuse" (it holds this process id); returns the open file, or None."""
+    try:
+        f = open(folder + INUSE_SUFFIX, "w+", encoding="ascii")
+    except OSError:
+        return None
+    try:
+        f.write(f"{os.getpid()}\n")
+        f.flush()
+        _lock(f)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def release_in_use(f):
+    """Unlock, close and remove a marker made by mark_in_use."""
+    if f is None:
+        return
+    path = f.name
+    try:
+        _unlock(f)
+    except OSError:
+        pass
+    try:
+        f.close()
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def in_use(folder):
+    """True when a running viewer holds the marker of folder. A marker nobody holds is removed."""
+    path = folder + INUSE_SUFFIX
+    if not os.path.exists(path):
+        return False
+    try:
+        f = open(path, "r+", encoding="ascii")
+    except OSError:
+        return True            # cannot even be opened: someone has it
+    try:
+        _lock(f)
+    except OSError:
+        f.close()
+        return True
+    _unlock(f)
+    f.close()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return False
+
+
+def stale_copies(exclude=(), tmp=None):
+    """Copy folders left in the temp folder by earlier runs that still hold databases: made by the viewer's copy
+    step (COPY_NAME), not used by a running viewer (in_use), not in exclude."""
+    tmp = tmp or tempfile.gettempdir()
     out = []
-    for name in os.listdir(tmp):
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return out
+    for name in names:
         p = os.path.join(tmp, name)
-        if name.startswith(("plrelate-", "pldevices-")) and os.path.isdir(p) and p not in exclude:
-            for _, _, files in os.walk(p):
-                if any(f.endswith(".db") for f in files):
-                    out.append(p)
-                    break
+        if not COPY_NAME.fullmatch(name) or not os.path.isdir(p) or p in exclude or in_use(p):
+            continue
+        for _, _, files in os.walk(p):
+            if any(f.endswith(".db") for f in files):
+                out.append(p)
+                break
     return sorted(out)
 
 

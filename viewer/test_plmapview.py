@@ -2585,6 +2585,62 @@ class ViewerReview3Test(unittest.TestCase):
             self.assertEqual(norm(app, st.lookup("TScrollbar", "background")), T.PALETTES[name]["thumb"])
             self.assertEqual(norm(app, st.lookup("TCombobox", "bordercolor")), T.PALETTES[name]["edge"])
 
+    # ---- 17 housekeeping
+    def test_a_failed_theme_save_is_shown_on_the_status_line(self):
+        app = self.make(settings_path=os.path.join(self.tmp.name, "viewer.json"))
+        with mock.patch.object(V.T, "save_mode", return_value=False):
+            app.set_theme_mode("dark")
+        self.assertIn("theme choice could not be saved", app.status.cget("text"))
+        self.assertIn("copies match", app.status.cget("text"))           # the hash check is still there
+        app.set_theme_mode("light")                                       # a save that works clears it
+        self.assertNotIn("could not be saved", app.status.cget("text"))
+
+    def test_stale_copies_skip_folders_in_use_and_test_folders(self):
+        tmp = os.path.join(self.tmp.name, "temp")
+        os.makedirs(tmp)
+
+        def copy(name):
+            p = os.path.join(tmp, name)
+            os.makedirs(p)
+            open(os.path.join(p, "phone.db"), "wb").close()
+            return p
+        old = copy("plrelate-ab12cd_3")
+        live = copy("pldevices-zz99yy88")
+        dead = copy("plrelate-dead0000")
+        for name in ("plrelate-test-ab12cd34", "pltest-relate-ab12cd34", "plrelate-x"):
+            copy(name)
+        marker = V.mark_in_use(live)                  # another running viewer's copy
+        try:
+            with open(dead + V.INUSE_SUFFIX, "w") as f:    # its viewer is gone: nobody holds the marker
+                f.write("1")
+            self.assertTrue(V.in_use(live))
+            self.assertFalse(V.in_use(dead))
+            self.assertEqual(V.stale_copies(tmp=tmp), sorted([old, dead]))
+            self.assertFalse(os.path.exists(dead + V.INUSE_SUFFIX), "a dead marker is cleaned up")
+        finally:
+            V.release_in_use(marker)
+        self.assertFalse(os.path.exists(live + V.INUSE_SUFFIX))
+        self.assertEqual(V.stale_copies(tmp=tmp), sorted([old, live, dead]))
+        app = self.app                                   # the viewer marks its own copies while it runs
+        work = app.ev.work
+        self.assertTrue(V.in_use(work))
+        app.on_close(warn=False)
+        self.assertFalse(os.path.exists(work + V.INUSE_SUFFIX))
+
+    def test_a_filter_record_that_cannot_be_written_removes_the_older_one(self):
+        app = self.app
+        app.show("E_calls")
+        out = os.path.join(self.tmp.name, "calls.csv")
+        with open(out + ".filter.txt", "w", encoding="utf-8") as f:
+            f.write("an older record of another export")
+        with mock.patch.object(V.filedialog, "asksaveasfilename", lambda **k: out),                 mock.patch.object(V, "write_text_atomic", side_effect=OSError(28, "No space left on device")):
+            app.export()
+        self.assertTrue(os.path.exists(out))
+        self.assertFalse(os.path.exists(out + ".filter.txt"), "a stale record must not sit next to the new CSV")
+        text = app.status.cget("text")
+        self.assertIn("could not be written", text)
+        self.assertIn("older", text)
+
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
         app = self.app
