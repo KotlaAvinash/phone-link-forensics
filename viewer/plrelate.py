@@ -39,13 +39,19 @@ import plnotif  # noqa: E402  (notifications.db)
 DIGITS = 10
 DEFAULT_WINDOW_MIN = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
-# maps used for the SQLECmd map output, first match wins:
-#   repo layout:     viewer/../maps (the maps) + viewer/maps-upstream (the 4 upstream Phone Link maps)
-#   project layout:  03-tools/../06-upstream-sqlecmd/maps + maps-upstream-yourphone
-_REPO = [os.path.join(HERE, "..", "maps"), os.path.join(HERE, "maps-upstream")]
-_PROJECT = [os.path.join(HERE, "..", "06-upstream-sqlecmd", "maps"),
-            os.path.join(HERE, "..", "06-upstream-sqlecmd", "maps-upstream-yourphone")]
-DEFAULT_MAP_DIRS = _REPO if os.path.isdir(_REPO[1]) else _PROJECT
+UPSTREAM_ENV = "PL_UPSTREAM_MAPS"
+
+
+def default_map_dirs(environ=None):
+    """Folders of .smap files for the SQLECmd map output, in order; the first file of a name wins.
+    The repo's own maps (viewer/../maps) come first, then the upstream Phone Link maps: the folder(s) named in
+    $PL_UPSTREAM_MAPS (separated by os.pathsep, e.g. a SQLECmd clone's SQLMap/Maps), else viewer/maps-upstream."""
+    environ = os.environ if environ is None else environ
+    upstream = [d for d in environ.get(UPSTREAM_ENV, "").split(os.pathsep) if d.strip()]
+    return [os.path.join(HERE, "..", "maps")] + (upstream or [os.path.join(HERE, "maps-upstream")])
+
+
+DEFAULT_MAP_DIRS = default_map_dirs()
 
 # content_sequence.content_type -> (database, table) of that feed (R25 shows the table's row count beside it)
 FEEDS = {
@@ -1038,10 +1044,13 @@ def run_maps(ev, map_dirs):
     """Run every Phone Link map whose IdentifyQuery matches a staged database (as SQLECmd --hunt does)."""
     views = {}
     maps = []
+    taken = set()        # file names already read: the first folder holding a map of that name wins
     for d in map_dirs:
         if os.path.isdir(d):
-            maps += [read_smap(os.path.join(d, f)) for f in sorted(os.listdir(d))
-                     if f.endswith(".smap") and "YourPhone" in f]
+            for f in sorted(os.listdir(d)):
+                if f.endswith(".smap") and "YourPhone" in f and f.lower() not in taken:
+                    taken.add(f.lower())
+                    maps.append(read_smap(os.path.join(d, f)))
     for db in P.DB_NAMES:
         c = ev.con(db)
         if c is None:

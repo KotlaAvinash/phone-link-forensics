@@ -1,6 +1,6 @@
 """Tests for plrelate.py on the synthetic pldemo device folder (planted answers).
 
-    python -m unittest test_plrelate -v        (from 03-tools)
+    python viewer/test_plrelate.py
 """
 import glob
 import hashlib
@@ -203,6 +203,38 @@ class SmapReader(unittest.TestCase):
                 self.assertEqual(a["BaseFileName"], b["BaseFileName"], f)
                 self.assertEqual([x["BlobColumn"] for x in a.get("BlobColumns", [])],
                                  [x["BlobColumn"] for x in b.get("BlobColumns") or []], f)
+
+
+class MapLookup(unittest.TestCase):
+    def test_no_private_folder_layout_in_the_code(self):
+        with open(os.path.join(HERE, "plrelate.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        for private in ("06-upstream-sqlecmd", "03-tools", "maps-upstream-yourphone"):
+            self.assertNotIn(private, src)
+
+    def test_default_is_the_repo_and_the_env_var_adds_upstream_maps(self):
+        repo = [os.path.join(HERE, "..", "maps"), os.path.join(HERE, "maps-upstream")]
+        self.assertEqual(R.default_map_dirs({}), repo)
+        self.assertEqual(R.DEFAULT_MAP_DIRS, R.default_map_dirs())
+        up = os.pathsep.join(["up1", "up2"])
+        self.assertEqual(R.default_map_dirs({"PL_UPSTREAM_MAPS": up}), [repo[0], "up1", "up2"])
+
+    def test_first_map_file_of_a_name_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            other = os.path.join(d, "upstream")
+            os.makedirs(other)
+            name = "Windows_YourPhone_CallingDB.smap"
+            with open(os.path.join(HERE, "..", "maps", name), encoding="utf-8") as fh:
+                text = fh.read()
+            with open(os.path.join(other, name), "w", encoding="utf-8") as fh:
+                fh.write(text.replace("Description: ", "Description: OLDER COPY "))
+            ev = R.Evidence(pldemo.build(os.path.join(d, "device")))
+            try:
+                views = R.run_maps(ev, [os.path.join(HERE, "..", "maps"), other])
+            finally:
+                ev.close()
+            self.assertTrue(views["M_CallingDB_CallHistory"].rows)
+            self.assertNotIn("OLDER COPY", views["M_CallingDB_CallHistory"].basis)
 
 
 class CopyIntegrity(unittest.TestCase):
