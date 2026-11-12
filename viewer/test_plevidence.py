@@ -1157,6 +1157,84 @@ class FailedStaging(unittest.TestCase):
             self.assertFalse(os.path.exists(made[0]))
 
 
+class CopyRemoval(unittest.TestCase):
+    """The staged copy is removed with retries (Windows file locks); a copy that stays behind is reported."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.src = pldemo.build(os.path.join(self.tmp.name, "device"))
+        self.real_rmtree, self.real_sleep = R.shutil.rmtree, R.time.sleep
+        self.calls = 0
+        R.time.sleep = lambda s: None
+        self.addCleanup(self.restore)
+        self.addCleanup(lambda: R.LEFT_BEHIND.clear())
+
+    def restore(self):
+        R.shutil.rmtree, R.time.sleep = self.real_rmtree, self.real_sleep
+
+    def locked_for(self, n):
+        """rmtree that removes nothing for its first n calls, as while another process holds a file open."""
+        def rmtree(path, *a, **k):
+            self.calls += 1
+            if self.calls > n:
+                return self.real_rmtree(path, *a, **k)
+        R.shutil.rmtree = rmtree
+
+    def test_close_retries_a_locked_copy(self):
+        ev = R.Evidence(self.src)
+        self.locked_for(2)
+        self.assertIsNone(ev.close())
+        self.assertFalse(os.path.exists(ev.work))
+        self.assertEqual(self.calls, 3)
+        self.assertEqual(R.LEFT_BEHIND, [])
+
+    def test_close_reports_a_copy_it_cannot_remove(self):
+        ev = R.Evidence(self.src)
+        self.locked_for(10 ** 6)
+        left = ev.close()
+        self.restore()
+        self.addCleanup(shutil.rmtree, ev.work, True)
+        self.assertEqual(left, ev.work)
+        self.assertEqual(ev.left_behind, ev.work)
+        self.assertIn(ev.work, R.LEFT_BEHIND)
+        self.assertEqual(self.calls, R.RMTREE_TRIES)
+
+    def test_failed_open_reports_the_copy_it_could_not_remove(self):
+        work = os.path.join(self.tmp.name, "work")
+        real_stage = P.stage
+
+        def broken(src_dir, w, acq):
+            os.makedirs(w, exist_ok=True)
+            shutil.copy2(os.path.join(src_dir, "phone.db"), os.path.join(w, "phone.db"))
+            raise RuntimeError("disk full")
+        P.stage = broken
+        self.addCleanup(setattr, P, "stage", real_stage)
+        self.locked_for(10 ** 6)
+        with self.assertRaises(RuntimeError) as cm:
+            R.Evidence(self.src, work=work)
+        self.restore()
+        self.assertTrue(os.path.exists(work))
+        self.assertEqual(cm.exception.left_behind, work)
+        self.assertIn(work, R.LEFT_BEHIND)
+        self.assertTrue(any(work in n for n in getattr(cm.exception, "__notes__", [])))
+
+    def test_failed_open_retries_too(self):
+        work = os.path.join(self.tmp.name, "work")
+        real_stage = P.stage
+
+        def broken(src_dir, w, acq):
+            os.makedirs(w, exist_ok=True)
+            raise RuntimeError("disk full")
+        P.stage = broken
+        self.addCleanup(setattr, P, "stage", real_stage)
+        self.locked_for(1)
+        with self.assertRaises(RuntimeError):
+            R.Evidence(self.src, work=work)
+        self.assertFalse(os.path.exists(work))
+        self.assertEqual(R.LEFT_BEHIND, [])
+
+
 GUID_A, GUID_B = pldemo.PAIRING_GUIDS[0], pldemo.PAIRING_GUIDS[1]   # synthetic pairing-folder GUIDs
 DELETED_PKG = "com.deleted.from.phone.a."          # prefix of every deleted FullTrust row for device A
 ORPHAN_PKG = "com.orphan.no.device."              # deleted FullTrust rows with a blank device_id

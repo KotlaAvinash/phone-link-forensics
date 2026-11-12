@@ -28,6 +28,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import time
 import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -130,6 +131,25 @@ def sim_id(v):
 
 
 # ---------------------------------------------------------------- evidence (copies only)
+RMTREE_TRIES = 5            # removing a copy: Windows can hold a file open a moment after its handle is closed
+RMTREE_DELAY = 0.2          # seconds between tries
+LEFT_BEHIND = []            # every copy folder this process could not remove (from close() or a failed open)
+
+
+def remove_copy(path):
+    """Remove a copy folder, retrying a few times. Returns None when it is gone, else the path (also recorded in
+    LEFT_BEHIND, so it is never left silently)."""
+    for i in range(RMTREE_TRIES):
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            return None
+        if i + 1 < RMTREE_TRIES:
+            time.sleep(RMTREE_DELAY)
+    if path not in LEFT_BEHIND:
+        LEFT_BEHIND.append(path)
+    return path
+
+
 class Evidence:
     """Stage one device folder to a temporary copy, verify it, and open it read-only."""
 
@@ -139,6 +159,7 @@ class Evidence:
         self.acq = []
         self.verify = []
         self.snapshot_note = ""
+        self.left_behind = None     # the copy folder, if close() could not remove it
         self._con = {}
         self._cols = {}
         self.missing = {}       # (db, table) -> columns the viewer asked for that this copy does not have
@@ -166,8 +187,13 @@ class Evidence:
                                             "source_stable": row["source_stable"]})
             if any(v["copy_matches"] == "NO" for v in self.verify):
                 raise IOError("a staged copy does not match its source hash")
-        except BaseException:
-            shutil.rmtree(self.work, ignore_errors=True)  # do not leave a bad or partial copy behind
+        except BaseException as e:
+            left = remove_copy(self.work)                 # do not leave a bad or partial copy behind
+            if left:
+                # the caller only gets the exception: it carries the folder, so it can be reported, not lost
+                e.left_behind = left
+                if hasattr(e, "add_note"):
+                    e.add_note("the staged copy at %s could not be removed" % left)
             raise
         moving = [r["file"] for r in self.acq if r.get("source_stable", "yes") != "yes"]
         if moving:
@@ -239,14 +265,14 @@ class Evidence:
         return self.con(db).execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] if self.has(db, table) else None
 
     def close(self, remove=True):
-        """Close and remove the copies. Returns the folder if it could not be removed, so callers can warn."""
+        """Close and remove the copies (retried, see remove_copy). Returns the folder if it could not be removed, so
+        callers can warn; it is also kept in self.left_behind and LEFT_BEHIND."""
         for c in self._con.values():
             c.close()
         self._con.clear()
         if remove:
-            shutil.rmtree(self.work, ignore_errors=True)
-            if os.path.exists(self.work):
-                return self.work
+            self.left_behind = remove_copy(self.work)
+            return self.left_behind
         return None
 
 
