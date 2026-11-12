@@ -427,10 +427,18 @@ class WindowFixesTest(unittest.TestCase):
     def test_failed_device_switch_keeps_the_previous_device(self):
         app = self.make([("good", self.src), ("bad", self.bad_device())])
         old_ev, old_g, old_work = app.ev, app.g, app.ev.work
-        before = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("plrelate-")}
+        real_mkdtemp, made, others = tempfile.mkdtemp, [], []
+
+        def mkdtemp(*a, **k):        # records this load's copy folder; another test run makes one at the same time
+            p = real_mkdtemp(*a, **k)
+            if os.path.basename(p).startswith("plrelate-"):
+                made.append(p)
+                others.append(real_mkdtemp(prefix="plrelate-"))
+            return p
         app.dev_combo.current(1)
-        with mock.patch.object(V.messagebox, "showerror") as err:
+        with mock.patch.object(V.messagebox, "showerror") as err, mock.patch.object(tempfile, "mkdtemp", mkdtemp):
             app.load_device(1)
+        self.addCleanup(lambda: [os.rmdir(o) for o in others if os.path.isdir(o)])
         self.assertEqual(err.call_count, 1)
         self.assertIs(app.ev, old_ev)
         self.assertIs(app.g, old_g)
@@ -438,8 +446,10 @@ class WindowFixesTest(unittest.TestCase):
         self.assertEqual(app.dev_combo.current(), 0)
         self.assertIn("good", app.src_lbl.cget("text"))
         self.assertNotIn("bad", app.src_lbl.cget("text"))
-        after = {n for n in os.listdir(tempfile.gettempdir()) if n.startswith("plrelate-")}
-        self.assertEqual(after - before, set(), "the failed device's partial copy must be removed")
+        # only this load's own copy folder is checked: other runs share %TEMP% and make plrelate-* folders too
+        self.assertEqual(len(made), 1, made)
+        self.assertFalse(os.path.exists(made[0]), "the failed device's partial copy must be removed")
+        self.assertTrue(all(os.path.isdir(o) for o in others), "another run's folder is not touched")
         app.show("E_calls")                   # still fully usable
         self.assertTrue(app.table.get_children())
 
