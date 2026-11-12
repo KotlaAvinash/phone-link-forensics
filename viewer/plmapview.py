@@ -245,6 +245,11 @@ HINTS = {
              "YYYY-MM-DD HH:MM[:SS]; To is inclusive. Quick ranges end at the NEWEST time in the case, not now. "
              "Times marked (no zone) cannot be put in time order with the others: they count as undated (kept "
              "or removed with “Keep undated rows”) and sort after the times that have a zone.",
+    "keys": "Keyboard: Ctrl+Left / Ctrl+Right pick the column (named at the end of this line); Alt+Down, "
+            "Shift+F10 or the Menu key open its filter. In the filter: Tab and Shift+Tab move inside it, Space ticks, "
+            "Enter presses the focused button (else OK), Esc cancels, Ctrl+Left / Ctrl+Right (outside a text box) "
+            "open the filter of the column before or after. Ctrl+F: the Filter box; Ctrl+Shift+F: clear all "
+            "filters; Ctrl+E: export; F6: next pane.",
     "theme": "Light, dark, or follow the Windows app colour (checked every 5 seconds). Ctrl+Shift+L switches. "
              "The choice is remembered for next time (not in --demo or --screenshot runs).",
 }
@@ -1123,6 +1128,9 @@ class Viewer(tk.Tk):
                 self.table.bind(seq, lambda e: self._open_focused())
             except tk.TclError:      # a key this platform does not have
                 pass
+        self.table.bind("<Control-Left>", lambda e: self.move_col(-1))
+        self.table.bind("<Control-Right>", lambda e: self.move_col(1))
+        self._hint(self.filter_lbl, HINTS["keys"])
         self.table.bind("<Button-1>", self._note_column, add="+")
         self.table.bind("<Button-3>", self._heading_click)
         self.bind("<Button-1>", self._click_outside, add="+")
@@ -1242,6 +1250,8 @@ class Viewer(tk.Tk):
               for n in [self.zoneless(c)] if n]
         if zl:
             text += "   |   " + ", ".join(f"{n:,} time{'' if n == 1 else 's'} in {c}" for c, n in zl) +                 " marked (no zone) count as undated"
+        if self.current_col():
+            text += f"   |   column for Alt+Down: {self.current_col()}"
         if self.filter_note:
             text += f"   |   {self.filter_note}"
         self.filter_lbl.config(text=text)
@@ -1352,8 +1362,9 @@ class Viewer(tk.Tk):
 
     def _note_column(self, e):
         col = self._column_at(e.x)
-        if col:
+        if col and col != self.focus_col.get(self.cur_vid):
             self.focus_col[self.cur_vid] = col
+            self._filter_status()
 
     def _heading_click(self, e):
         if self.table.identify_region(e.x, e.y) == "heading":
@@ -1362,13 +1373,48 @@ class Viewer(tk.Tk):
                 self.open_filter(col)
                 return "break"
 
-    def _open_focused(self):
+    def current_col(self):
+        """The column Alt+Down / Shift+F10 opens: the last one clicked or picked with Ctrl+Left/Right, else the
+        first."""
         if self.g is None or self.cur_vid not in self.g.views:
-            return "break"
+            return None
         cols = self.g.views[self.cur_vid].cols
         col = self.focus_col.get(self.cur_vid)
-        if cols:
-            self.open_filter(col if col in cols else cols[0])
+        return col if col in cols else (cols[0] if cols else None)
+
+    def move_col(self, step):
+        """Ctrl+Left / Ctrl+Right on the table: the previous or next column becomes the keyboard's column (shown
+        on the filter line and scrolled into view)."""
+        col = self.current_col()
+        if col is None:
+            return "break"
+        cols = self.g.views[self.cur_vid].cols
+        col = cols[max(0, min(len(cols) - 1, cols.index(col) + step))]
+        self.focus_col[self.cur_vid] = col
+        self._see_col(col)
+        self._filter_status()
+        return "break"
+
+    def _see_col(self, col):
+        """Scroll the table sideways so that column col is in view."""
+        cols = list(self.table["columns"])
+        if col not in cols:
+            return
+        widths = [int(self.table.column(c, "width")) for c in cols]
+        total, start = sum(widths), sum(widths[:cols.index(col)])
+        if total <= 0:
+            return
+        left, right = self.table.xview()
+        end = start + widths[cols.index(col)]
+        if start < left * total:
+            self.table.xview_moveto(start / total)
+        elif end > right * total:
+            self.table.xview_moveto(max(0.0, (end - (right - left) * total) / total))
+
+    def _open_focused(self):
+        col = self.current_col()
+        if col is not None:
+            self.open_filter(col)
         return "break"
 
     def _click_outside(self, e):
@@ -1875,6 +1921,8 @@ class FilterPanel(tk.Frame):
         self.bind_class("PLFilterPanel", "<Escape>", lambda e: self._key(e, "cancel"))
         self.bind_class("PLFilterPanel", "<Return>", lambda e: self._key(e, "ok"))
         self.bind_class("PLFilterPanel", "<KP_Enter>", lambda e: self._key(e, "ok"))
+        self.bind_class("PLFilterPanel", "<Control-Left>", lambda e: self._next_col(e, -1))
+        self.bind_class("PLFilterPanel", "<Control-Right>", lambda e: self._next_col(e, 1))
         self._keys(self)
         self._place()
         self.search_entry.focus_set()
@@ -1891,6 +1939,22 @@ class FilterPanel(tk.Frame):
         panel = getattr(e.widget.winfo_toplevel(), "panel", None) if hasattr(e.widget, "winfo_toplevel") else None
         if panel is not None:
             panel.cancel() if what == "cancel" else panel.ok()
+        return "break"
+
+    def _next_col(self, e, step):
+        """Ctrl+Left / Ctrl+Right outside a text box: the filter of the column before or after (in a text box the
+        keys move by word, as usual)."""
+        if e.widget.winfo_class() in ("Entry", "TEntry", "Spinbox", "TCombobox"):
+            return None
+        panel = getattr(self.app, "panel", None)
+        if panel is None:
+            return "break"
+        cols = self.app.g.views[panel.vid].cols
+        i = cols.index(panel.col) + step
+        if 0 <= i < len(cols):
+            self.app.focus_col[panel.vid] = cols[i]
+            self.app._see_col(cols[i])
+            self.app.open_filter(cols[i])
         return "break"
 
     def _place(self):

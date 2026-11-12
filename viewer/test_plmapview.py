@@ -2108,6 +2108,15 @@ class ThemeViewerTest(unittest.TestCase):
     def test_row_height_fits_the_font_at_high_dpi(self):
         app = self.app
         st = V.ttk.Style(app)
+        # Tk keeps the scaling per display, shared by every later window of the process: put it back afterwards
+        old = float(app.tk.call("tk", "scaling"))
+        try:
+            self._row_heights_at(app, st)
+        finally:
+            app.tk.call("tk", "scaling", old)
+            app.refit_fonts()
+
+    def _row_heights_at(self, app, st):
         for display in (1.0, 1.5, 2.0):
             app.tk.call("tk", "scaling", display * 96 / 72)
             app.refit_fonts()
@@ -2396,6 +2405,39 @@ class ViewerReview3Test(unittest.TestCase):
         self.assertIn("as logged (local time)", app.export_record(os.path.join(self.tmp.name, "x.csv")))
         app.show("C_usb")
         self.assertNotIn("as logged", app.filter_lbl.cget("text"))
+
+    # ---- 9 the keyboard can pick any column to filter
+    def test_ctrl_left_right_pick_the_column_for_the_keyboard_filter(self):
+        app = self.sized(1366, 740)
+        app.show("E_calls", select_index=0)
+        cols = app.g.views["E_calls"].cols
+
+        def key(widget, seq):
+            widget.focus_force()
+            app.update()
+            widget.event_generate(seq)
+            app.update()
+        self.assertEqual(app.current_col(), cols[0])
+        self.assertIn(f"column for Alt+Down: {cols[0]}", app.filter_lbl.cget("text"))
+        key(app.table, "<Control-Right>")
+        key(app.table, "<Control-Right>")
+        self.assertEqual(app.current_col(), cols[2])
+        self.assertIn(f"column for Alt+Down: {cols[2]}", app.filter_lbl.cget("text"))
+        key(app.table, "<Control-Left>")
+        self.assertEqual(app.current_col(), cols[1])
+        for _ in range(len(cols) + 2):
+            key(app.table, "<Control-Right>")
+        self.assertEqual(app.current_col(), cols[-1])           # stops at the last column
+        left, right = app.table.xview()
+        self.assertEqual(right, 1.0)                             # scrolled into view
+        key(app.table, "<Alt-Down>")
+        self.assertEqual(app.panel.col, cols[-1])
+        key(app.panel.list, "<Control-Left>")                   # in the panel, outside a text box: the next panel
+        self.assertEqual(app.panel.col, cols[-2])
+        key(app.panel.search_entry, "<Control-Left>")           # in a text box it moves by word, as usual
+        self.assertEqual(app.panel.col, cols[-2])
+        self.assertIn("Ctrl+Left", app.hints[app.filter_lbl])
+        self.assertIn("Alt+Down", app.hints[app.filter_lbl])
 
 
 if __name__ == "__main__":
