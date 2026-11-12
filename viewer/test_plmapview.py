@@ -2264,6 +2264,27 @@ class ViewerReview3Test(unittest.TestCase):
             self.assertLessEqual(bottom, app.winfo_height(), (w, h - 120))
             app.on_close(warn=False)
 
+    # ---- 4 export with a text search still waiting for its timer
+    def test_export_applies_a_pending_text_search_first(self):
+        app = self.app
+        app.show("E_calls")
+        app._key_typed()                      # a keystroke: the refill waits for the debounce timer ...
+        app.filter_var.set("Alice")
+        self.assertIsNotNone(app._filter_job)
+        self.assertEqual(len(app.cur_rows), 5)
+        out = os.path.join(self.tmp.name, "race.csv")
+        with mock.patch.object(V.filedialog, "asksaveasfilename", lambda **k: out):
+            app.export()                      # ... Ctrl+E before it fires
+        with open(out, encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))[1:]
+        self.assertEqual(len(rows), 2)
+        with open(out + ".filter.txt", encoding="utf-8-sig") as f:
+            side = f.read()
+        self.assertIn("Rows exported: 2 of 5", side)
+        self.assertIn("'Alice'", side)
+        self.assertIsNone(app._filter_job)
+        self.assertEqual(len(app.table.get_children()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

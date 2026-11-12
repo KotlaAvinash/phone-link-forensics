@@ -1582,6 +1582,9 @@ class Viewer(tk.Tk):
     def export(self):
         if self.g is None or not self.cur_vid:
             return
+        if self._filter_job is not None:     # a text search still waiting for its timer: apply it now, so the CSV
+            sel = self.table.selection()      # and the .filter.txt always describe the same rows
+            self.populate(int(sel[0]) if sel else None)      # (populate cancels the timer)
         v = self.g.views[self.cur_vid]
         path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=f"{self.cur_vid}.csv",
                                             filetypes=[("CSV", "*.csv")])
