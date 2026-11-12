@@ -45,6 +45,8 @@ DATA_TABLES = {"calling.db": ["call_history"], "phone.db": ["message", "conversa
                "notifications.db": ["notifications"], "sharedcontent.db": ["sharedcontent", "shareduri"]}
 INFER_WINDOW_S = 600   # fallback only: registration this close before a folder's creation -> inferred same pairing
 STORED_PR3 = "stored: Metadata.Id = pairing folder GUID"
+NO_SUCH_FOLDER = ("Metadata.Id is a pairing-folder GUID, but no such folder exists (its data was removed) - "
+                  "not matched")
 SNAPSHOT_TRIES = 3     # copies of a file whose source keeps changing, before it is kept and flagged
 UNSTABLE = "n/a - source changed during copy"
 SET_SUFFIXES = ("-wal", "-shm")   # copied with the database they belong to, as one set
@@ -691,22 +693,27 @@ def _build(pc, g, View, ts_seconds, iso):
                     "GapSeconds": int(r["_created"] - m["_reg_ts"]) if trusted and m.get("_reg_ts") is not None else "",
                     "Basis": STORED_PR3})
 
-    # Time fallback, only for a phone (never a PC or an unknown device) whose Id is not a GUID or names no folder
-    # here, and only to a folder no stored link claims. The phone is a candidate for every such folder created
-    # within the window after it registered. Only a one-to-one pair - the phone has one candidate folder and that
-    # folder one candidate phone - is linked; anything else is listed as ambiguous and not linked. Copy-time
-    # folder dates match nothing.
+    # A phone whose Id is a GUID that names no folder here: the Id is the folder name, so its folder was removed.
+    # Matching it to another folder by time would contradict the stored Id - it is listed, never matched.
+    def guid_id(m):
+        return bool(m.get("MetadataID")) and bool(GUID.match(norm_id(m.get("MetadataID"))))
+
+    for m in meta_rows:
+        if "_e" in m and m.get("_kind") == "phone" and m["_e"] not in stored_entries and guid_id(m):
+            rel.append({"_e": m["_e"], "Phone": g.label[m["_e"]], "Pairing": "", "RegisteredUTC": m["RegisteredUTC"],
+                        "FolderCreatedUTC": "", "GapSeconds": "", "Basis": NO_SUCH_FOLDER})
+
+    # Time fallback, only for a phone (never a PC or an unknown device) whose Id is missing or not a GUID, and only
+    # to a folder no stored link claims. The phone is a candidate for every such folder created within the window
+    # after it registered. Only a one-to-one pair - the phone has one candidate folder and that folder one
+    # candidate phone - is linked; anything else is listed as ambiguous and not linked. Copy-time folder dates
+    # match nothing.
     def no_folder_id(m):
-        mid = m.get("MetadataID")
-        if not mid:
-            return "no Metadata.Id"
-        if not GUID.match(norm_id(mid)):
-            return "Metadata.Id is not a GUID"
-        return "Metadata.Id is a GUID that names no pairing folder here"
+        return "Metadata.Id is not a GUID" if m.get("MetadataID") else "no Metadata.Id"
 
     free = [r for r in folder_rows if r["DeviceFolder"] not in stored_folder]
     phones = [m for m in meta_rows if trusted and "_e" in m and m.get("_kind") == "phone"
-              and m.get("_reg_ts") is not None and m["_e"] not in stored_entries]
+              and m.get("_reg_ts") is not None and m["_e"] not in stored_entries and not guid_id(m)]
     cands = [(m, [r for r in free if 0 <= r["_created"] - m["_reg_ts"] <= INFER_WINDOW_S]) for m in phones]
     per_folder = {}
     for m, near in cands:
@@ -734,8 +741,9 @@ def _build(pc, g, View, ts_seconds, iso):
         (copy_warn + ". Nothing is matched by time; stored links still hold. " if copy_warn else "") +
         "stored link: DeviceMetadataStorage.json Metadata.Id equals the pairing folder's GUID (case and braces "
         "ignored); Phone Link removes the entry when the phone is unlinked, so a folder that no Id names is a pairing "
-        "whose details were removed. Fallback, only for a phone whose Id is not a GUID or names no folder here: it is "
-        f"matched to a folder that no stored link claims, created within {INFER_WINDOW_S // 60} minutes after its "
+        "whose details were removed. A phone whose Id is a GUID that names no folder here is listed as not matched: "
+        "its folder was removed, and matching it to another folder would contradict the stored Id. Fallback, only "
+        "for a phone whose Id is missing or not a GUID: it is matched to a folder that no stored link claims, created within {INFER_WINDOW_S // 60} minutes after its "
         f"registration time ({FOLDER_TIME_CAVEAT}). The fallback matches only phones, and only one-to-one: when a "
         f"phone has several such folders or a folder several such phones, every candidate is listed as AMBIGUOUS and "
         f"none is linked. Basis says which each row is - the fallback is an inference, not a stored link",

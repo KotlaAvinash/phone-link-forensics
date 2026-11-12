@@ -562,11 +562,26 @@ class StoredFolderLink(unittest.TestCase):
         self.assertTrue(rows["phone P3"]["Basis"].startswith("inferred by time (fallback"), rows)
         self.assertIn("not a GUID", rows["phone P3"]["Basis"])
 
-    def test_guid_id_naming_no_folder_falls_back_to_time_and_says_so(self):
-        meta = {"DeviceMetadatas": {"HW1": [entry(G[5], "P1", "Android", T0 - 60)]}}
+    def test_guid_id_naming_no_folder_is_never_matched_by_time(self):
+        # the Id is the folder name, so this phone's folder is gone: G[0] is another pairing, whatever its time
+        meta = {"DeviceMetadatas": {"HW1": [entry("{%s}" % G[5].upper(), "P1", "Android", T0 - 60)]}}
         g = build_with_folder_times(meta, {G[0]: T0})
-        self.assertEqual(sorted((a[1], b[1]) for a, b in pr3_links(g)), [(G[5], G[0])])
-        self.assertIn("names no pairing folder", g.views["PR3"].rows[0]["Basis"])
+        self.assertNotIn("WARNING", g.views["PR3"].basis)       # times are trusted: only the rule keeps it out
+        self.assertEqual(pr3_links(g), [])
+        rows = g.views["PR3"].rows
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["Phone"], "phone P1")
+        self.assertEqual(rows[0]["Pairing"], "")
+        self.assertEqual(rows[0]["Basis"], D.NO_SUCH_FOLDER)
+        self.assertIn("no such folder exists", rows[0]["Basis"])
+        self.assertIn("not matched", rows[0]["Basis"])
+        self.assertIn("missing or not a GUID", g.views["PR3"].basis)
+
+    def test_guid_id_naming_no_folder_is_said_even_on_copy_time_folders(self):
+        meta = {"DeviceMetadatas": {"HW1": [entry(G[5], "P1", "Android", T0)]}}
+        g = build_with_folder_times(meta, {G[0]: T0 + 0.1, G[1]: T0 + 0.2})   # created together: copy times
+        self.assertEqual([r["Basis"] for r in g.views["PR3"].rows], [D.NO_SUCH_FOLDER])
+        self.assertEqual(pr3_links(g), [])
 
     def test_history_names_the_phone_of_a_stored_folder(self):
         meta = {"DeviceMetadatas": {"HW1": [entry(G[0], "P1", "Android", T0 - 60)]}}
