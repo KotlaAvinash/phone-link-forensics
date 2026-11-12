@@ -460,6 +460,28 @@ class SchemaTolerance(unittest.TestCase):
         ev, g = build_edited(self, {"phone.db": ["UPDATE message SET subscription_id = NULL WHERE message_id = 3"]})
         self.assertFalse([r for r in g.views["R23"].rows if r["Problem"] == "message without SIM"])   # no key at all
 
+    def test_negative_subscription_id_is_no_sim_not_an_orphan(self):
+        # Android's "no subscription" is -1; other negative ids mean no SIM recorded either
+        for v in (-1, -2):
+            ev, g = build_edited(self, {"phone.db": [("UPDATE message SET subscription_id = ? WHERE message_id = 3",
+                                                      (v,))]})
+            self.assertFalse([r for r in g.views["R23"].rows if r["Problem"] == "message without SIM"], v)
+            r10 = [r for r in g.views["R10"].rows if r["MessageID"] == 3][0]
+            self.assertEqual(r10["SIMFound"], "no SIM recorded", v)
+
+    def test_sim_ids_are_compared_as_numbers(self):
+        # '1.0' / 1.0 and 1 name the same subscription; comparing str() would make them differ
+        ev, g = build_edited(self, {"calling.db": ["UPDATE call_history SET phone_account_id = '1.0'"
+                                                   " WHERE phone_account_id = '1'"]})
+        hits = [r for r in g.views["R14"].rows if r["PhoneAccountID"] == "1.0"]
+        self.assertTrue(hits)
+        self.assertEqual({r["SIMFound"] for r in hits}, {"yes"})
+        self.assertTrue(all(R.sim_id(v) == "1" for v in (1, 1.0, "1", "1.0", " 1 ")))
+        self.assertTrue(all(R.sim_id(v) is None for v in (None, -1, -2, -1.0, "-1", "")))
+        self.assertNotEqual(R.sim_id(2), R.sim_id(1))
+        ev, g = build_edited(self, {"phone.db": ["UPDATE message SET subscription_id = 2 WHERE message_id = 3"]})
+        self.assertEqual([r["MissingKey"] for r in g.views["R23"].rows if r["Problem"] == "message without SIM"], [2])
+
     def test_missing_table_is_stated(self):
         ev, g = build_edited(self)
         self.assertFalse([vid for vid, v in g.views.items() if "TABLE NOT IN THIS COPY" in v.basis])

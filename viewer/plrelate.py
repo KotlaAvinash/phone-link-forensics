@@ -106,6 +106,29 @@ def iso(sec):
         return ""
 
 
+def sim_id(v):
+    """A SIM / subscription id as a comparison key, or None for "no SIM recorded" (NULL, blank, or a negative id -
+    Android's "no subscription" is -1). Numbers, and text that is a number, compare as numbers: 1, 1.0 and '1' are
+    the same id ("1"); other text is compared as it is."""
+    if v is None or isinstance(v, bytes):
+        return None if v is None else v.hex()
+    if isinstance(v, (int, float)):
+        n = v
+    else:
+        t = str(v).strip()
+        if not t:
+            return None
+        try:
+            n = float(t)
+        except ValueError:
+            return t
+    if n != n or n in (float("inf"), float("-inf")):
+        return str(v)
+    if n < 0:
+        return None
+    return str(int(n)) if n == int(n) else repr(float(n))
+
+
 # ---------------------------------------------------------------- evidence (copies only)
 class Evidence:
     """Stage one device folder to a temporary copy, verify it, and open it read-only."""
@@ -716,14 +739,19 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         "sending_message.thread_id / message_id (phone.db) - messages the PC was sending",
         ["QueueID", "ThreadID", "MessageID", "Kind", "ResultCode"], rows)
 
-    # R10 messages -> SIM ; R14 calls -> SIM
-    sims = {str(s["subscription_id"]) for s in subs}
+    # R10 messages -> SIM ; R14 calls -> SIM. Ids are compared by sim_id: numbers as numbers, NULL / negative = no SIM
+    sims = {}
+    for s in subs:
+        if sim_id(s["subscription_id"]) is not None:
+            sims.setdefault(sim_id(s["subscription_id"]), _ent("sim", str(s["subscription_id"])))
     rows = []
     for m in sms_rows:
-        hit = str(m["SIM"]) in sims
+        k = sim_id(m["SIM"])
+        hit = k in sims
         if hit:
-            g.link("R10", m["_e"], _ent("sim", str(m["SIM"])))
-        rows.append({"MessageID": m["MessageID"], "SubscriptionID": m["SIM"], "SIMFound": "yes" if hit else "no"})
+            g.link("R10", m["_e"], sims[k])
+        rows.append({"MessageID": m["MessageID"], "SubscriptionID": m["SIM"],
+                     "SIMFound": "yes" if hit else ("no SIM recorded" if k is None else "no")})
     rel("R10", "SMS -> SIM", "id-join", "message.subscription_id = subscription.subscription_id (phone.db)",
         ["MessageID", "SubscriptionID", "SIMFound"], rows)
 
@@ -755,10 +783,12 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
     # R14 call -> SIM
     rows = []
     for c in call_rows:
-        hit = str(c["SIM"]) in sims
+        k = sim_id(c["SIM"])
+        hit = k in sims
         if hit:
-            g.link("R14", c["_e"], _ent("sim", str(c["SIM"])))
-        rows.append({"CallID": c["CallID"], "PhoneAccountID": c["SIM"], "SIMFound": "yes" if hit else "no"})
+            g.link("R14", c["_e"], sims[k])
+        rows.append({"CallID": c["CallID"], "PhoneAccountID": c["SIM"],
+                     "SIMFound": "yes" if hit else ("no SIM recorded" if k is None else "no")})
     rel("R14", "Call -> SIM", "examiner",
         "call_history.phone_account_id = phone.db subscription.subscription_id (examiner's join across databases)",
         ["CallID", "PhoneAccountID", "SIMFound"], rows)
@@ -921,10 +951,11 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         if has_col("phone.db", "rcs_conversation", "fallback_id") and r["fallback_id"] not in sms_threads:
             rows.append({"Problem": "RCS thread without SMS fallback thread", "Table": "rcs_conversation",
                          "ID": r["thread_id"], "MissingKey": r["fallback_id"]})
-    # a message naming a SIM the subscription table does not hold; NULL is "no SIM recorded", not a missing partner
+    # a message naming a SIM the subscription table does not hold; NULL and negative ids (Android's -1) are
+    # "no SIM recorded", not a missing partner
     if has_col("phone.db", "message", "subscription_id") and has_col("phone.db", "subscription", "subscription_id"):
         for m in sms_rows:
-            if m["SIM"] is not None and str(m["SIM"]) not in sims:
+            if sim_id(m["SIM"]) is not None and sim_id(m["SIM"]) not in sims:
                 rows.append({"Problem": "message without SIM", "Table": "message", "ID": m["MessageID"],
                              "MissingKey": m["SIM"]})
     rel("R23", "Orphans: rows whose partner is missing", "integrity",
