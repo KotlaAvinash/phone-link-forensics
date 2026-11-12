@@ -1285,6 +1285,7 @@ class Viewer(tk.Tk):
                 g.pack(in_=row, side="left")
             else:
                 g.pack(in_=row2, side="left", padx=(self.px(6) if n == len(groups) - moved else 0, 0))
+            g.tkraise()          # above the row it is packed into (a sibling made later would hide it)
         if moved:
             row2.pack(fill="x", after=row)
 
@@ -1767,7 +1768,12 @@ class Viewer(tk.Tk):
                                           where, SCOPE_WORDS.get(scope, scope)))
                 self.link_targets[iid] = target
                 n += 1
-        if n == 0:      # in "target", the first column shown: the pane never looks empty
+        # no linked row: the message alone, in "target" across the whole pane (it never looks empty or cut off)
+        shown = ("target",) if n == 0 else tuple(c for c, _, _ in LINK_COLS)
+        if tuple(self.links["displaycolumns"]) != shown:
+            self.links["displaycolumns"] = shown
+            self._fit_link_cols()
+        if n == 0:
             self.links.insert("", "end", values=("", "No other row is linked to this one" +
                                                  ("" if self.show_cross.get() else " inside its database"), "", ""))
 
@@ -1778,6 +1784,9 @@ class Viewer(tk.Tk):
         if width <= 1:
             return
         head = tkfont.nametofont("PL.bold", root=self)
+        if tuple(self.links["displaycolumns"]) == ("target",):       # only the "no linked row" message
+            self.links.column("target", width=max(head.measure("Linked row"), width - self.px(4)))
+            return
         mins = {c: head.measure(t) + self.px(18) for c, t, _ in LINK_COLS}
         spare = width - self.px(4) - sum(mins.values())       # the Treeview's own border
         weights = sum(w for _, _, w in LINK_COLS)

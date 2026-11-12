@@ -2247,6 +2247,9 @@ class ViewerReview3Test(unittest.TestCase):
             vals = dict(zip(app.links["columns"], app.links.item(kids[0], "values")))
             self.assertIn("No other row is linked", vals["target"])     # the first column shown
             self.assertEqual(app.links["displaycolumns"][0], "target")
+            body = tkfont.nametofont("PL.body", root=app)
+            self.assertGreaterEqual(int(app.links.column("target", "width")), body.measure(vals["target"]),
+                                    "the whole message is visible, not cut off")
             shown = app.links["displaycolumns"]
             widths = [int(app.links.column(c, "width")) for c in shown]
             self.assertLessEqual(sum(widths), app.links.winfo_width(), (w, widths))
@@ -2676,6 +2679,10 @@ class ViewerReview3Test(unittest.TestCase):
             self.assertTrue(title == "" or len(title.rstrip("…")) >= 8, (w, title))
             if w == 1600:
                 self.assertEqual(title, V.APP_TITLE)
+            stack = [str(c) for c in app.winfo_children()]                     # stacking order, lowest first
+            for g in app.range_groups:                                          # a group moved to the second
+                holder = str(g.pack_info()["in"])                               # row is drawn ABOVE that row
+                self.assertGreater(stack.index(str(g)), stack.index(holder), (w, str(g)))
             if w == 1000:
                 self.assertLess(int(app.dev_combo.cget("width")), 38)       # the device box shrinks ...
             self.assertEqual(app.hint_text(app.dev_combo), long1)               # ... its full name on hover
