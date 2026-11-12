@@ -2380,6 +2380,23 @@ class ViewerReview3Test(unittest.TestCase):
         p = app.open_filter("TimeUTC")
         self.assertIn("no zone", p.zoneless_lbl.cget("text"))
 
+    # ---- 8 the case-wide dates prefer a UTC column
+    def test_case_wide_dates_prefer_a_utc_column(self):
+        app = self.make(connections=V.C.demo_source())
+        for vid in ("C_usb", "C_install", "C_wpd", "E_calls"):
+            self.assertTrue(app.main_time_col(vid).endswith("UTC"), (vid, app.main_time_col(vid)))
+        app.g.add_view(V.R.View("X_local", "local only", "table", "synthetic", ["ID", "SeenLocal"],
+                                [{"ID": 1, "SeenLocal": "2030-01-01 10:00:00"}]))
+        app.fill_nav()
+        app.show("X_local")
+        self.assertEqual(app.main_time_col("X_local"), "SeenLocal")      # no UTC column: the local one
+        app.range_from.set("2030-01-01")
+        app.apply_range()
+        self.assertIn("SeenLocal, as logged (local time)", app.filter_lbl.cget("text"))
+        self.assertIn("as logged (local time)", app.export_record(os.path.join(self.tmp.name, "x.csv")))
+        app.show("C_usb")
+        self.assertNotIn("as logged", app.filter_lbl.cget("text"))
+
 
 if __name__ == "__main__":
     unittest.main()

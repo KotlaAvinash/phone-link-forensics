@@ -1158,17 +1158,31 @@ class Viewer(tk.Tk):
         return [c for c in self.g.views[vid].cols if self.col_type(c, vid) == F.DATE]
 
     def main_time_col(self, vid):
-        """The column the case-wide dates filter on: the one picked under 'Filter on', else the first time column
-        that holds any value, else the first time column; None when the view has no time column."""
+        """The column the case-wide dates filter on: the one picked under 'Filter on', else the first UTC time
+        column (name ending in UTC) that holds any value, else the first time column that holds any value (a local
+        or unstated zone: the filter line says 'as logged'), else the first UTC one, else the first; None when the
+        view has no time column."""
         dates = self.date_cols(vid)
         pick = self.range_cols.get(vid)
         if pick in dates:
             return pick
         rows = self.g.views[vid].rows if dates else []
-        for c in dates:
-            if any(not F.is_blank(r.get(c)) for r in rows):
-                return c
-        return dates[0] if dates else None
+        filled = [c for c in dates if any(not F.is_blank(r.get(c)) for r in rows)]
+        utc = [c for c in dates if c.upper().endswith("UTC")]
+        for group in ([c for c in filled if c in utc], filled, utc, dates):
+            if group:
+                return group[0]
+        return None
+
+    @staticmethod
+    def time_col_label(col):
+        """A time column's name, with what its zone is when it is not UTC (the case-wide dates compare times as
+        they are written)."""
+        if col.upper().endswith("UTC"):
+            return col
+        if col.endswith("Local"):
+            return f"{col}, as logged (local time)"
+        return f"{col}, as logged (zone not in the column name)"
 
     def _range_checks(self, vid):
         col = self.main_time_col(vid) if self.range_filter is not None else None
@@ -1218,7 +1232,7 @@ class Viewer(tk.Tk):
         """The filter line: every filter in force on this view, the counts, the sort."""
         v = self.g.views[self.cur_vid]
         st = self.view_state(self.cur_vid)
-        checks = [(f"All views: {c}", f) for c, f in self._range_checks(self.cur_vid)] + list(st["filters"].items())
+        checks = [(f"All views: {self.time_col_label(c)}", f) for c, f in self._range_checks(self.cur_vid)] +             list(st["filters"].items())
         text = F.describe_all(checks, self.filter_var.get(), len(self.cur_rows), len(v.rows))
         if st["sort"] and st["sort"][0] in v.cols:
             col, desc = st["sort"]
@@ -1477,7 +1491,7 @@ class Viewer(tk.Tk):
             f"Rows exported: {len(self.cur_rows):,} of {len(v.rows):,}, in the order shown in the viewer",
             "Sort: " + (f"{sort[0]}, {sort_words(self.col_type(sort[0]), sort[1])} (blanks last)" if sort
                         else "none - the order the rows were read"),
-            "Case-wide dates: " + (rng[0][1].describe(rng[0][0]) if rng else
+            "Case-wide dates: " + (rng[0][1].describe(self.time_col_label(rng[0][0])) if rng else
                                    "none" if self.range_filter is None else "none apply - this view has no time column"),
             "Column filters:"]
         lines += [f"  {f.describe(c)}" for c, f in st["filters"].items() if f.active] or ["  none"]
