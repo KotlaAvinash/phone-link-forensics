@@ -141,6 +141,19 @@ class Build(unittest.TestCase):
                          [("LE device", "Example Watch", "00:00:5E:00:53:03")])
         self.assertIn(le[0]["_e"], [t for rid, t, _ in self.g.links(("bt", "00005e005303")) if rid == "CR2"])
 
+    def test_snapshot_views_say_when_they_were_read(self):
+        times = iter(["2030-01-05 08:00:00", "2030-01-06 09:00:00"])
+        with mock.patch.object(C, "_utc_now", lambda: next(times)):
+            cached = C.CachedSource(C.demo_source())
+            g1, g2 = R.Graph(), R.Graph()
+            C.build(cached, g1, R.View)
+            C.build(cached, g2, R.View)        # same session: same snapshot, same read time
+        self.assertEqual(cached.read_utc, "2030-01-05 08:00:00")
+        for g in (g1, g2):
+            for v in g.views.values():
+                self.assertIn("read from this PC at 2030-01-05 08:00:00 UTC", v.basis, v.vid)
+        self.assertNotIn("read from this PC at", self.g.views["C_usb"].basis)   # an uncached source: no snapshot
+
     def test_cached_source_reads_once(self):
         src = Recording(C.demo_source())
         cached = C.CachedSource(src)

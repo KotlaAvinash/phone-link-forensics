@@ -415,6 +415,10 @@ def build(src, g, View):
         return local_to_utc(s, utc_logs)
 
     def add(vid, title, basis, cols, rows, entity=True):
+        when = getattr(guarded, "read_utc", None)   # a CachedSource: the views are a snapshot taken once
+        if when:
+            basis = (f"{basis}. Snapshot: read from this PC at {when} UTC, once per viewer session - later changes "
+                     f"are not shown until the viewer is reopened")
         v = View(vid, title, "conn", basis, cols, rows)
         g.add_view(v, "_e" if entity else None)
         vids.append(vid)
@@ -767,12 +771,19 @@ def build(src, g, View):
     return vids
 
 
+def _utc_now():
+    """Now in UTC as 'YYYY-MM-DD HH:MM:SS' (a function so tests can fix the clock)."""
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class CachedSource:
-    """Wrap a source so the registry, logs and event logs are read once per viewer session."""
+    """Wrap a source so the registry, logs and event logs are read once per viewer session. read_utc is when the
+    first read was made - the time of the snapshot every view built from it shows."""
 
     def __init__(self, src):
         self.src, self.memo = src, {}
         self.logs_in_utc = getattr(src, "logs_in_utc", False)
+        self.read_utc = None
 
     @property
     def denied(self):
@@ -781,6 +792,8 @@ class CachedSource:
     def _get(self, name, *args):
         k = (name,) + args
         if k not in self.memo:
+            if self.read_utc is None:
+                self.read_utc = _utc_now()
             self.memo[k] = getattr(self.src, name)(*args)
         return self.memo[k]
 
