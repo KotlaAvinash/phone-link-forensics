@@ -15,6 +15,9 @@ It also carves WAL frames, which hold page images the main file may no longer
 have. In a frame that a later frame of the same page supersedes, the LIVE cells
 are decoded too: a row deleted since then survives there whole, and so does
 the earlier version of a row edited since (a changed message body or status).
+The main file's own image of every page that the WAL holds a newer version of
+is decoded the same way (region main-superseded-cell): a row deleted after the
+last checkpoint, whose freed space in the WAL copy was reused, survives there.
 
 STATUS of each record (column `status`; compared with the live table by rowid,
 then by decoded values):
@@ -200,6 +203,7 @@ WAL_EARLIER_VERSION = "wal-superseded (earlier version of live row)"   # ... its
 # _version of a record decoded from a page version's live cells -> (status if rowid not live, if live but different)
 VERSION_STATUS = {"superseded": (WAL_SUPERSEDED, WAL_EARLIER_VERSION)}
 SUPERSEDED_REGION = "wal-superseded-cell"   # region: a live cell of a WAL frame that a later frame supersedes
+MAIN_SUPERSEDED_REGION = "main-superseded-cell"   # region: a live cell of the main file's image of a page the WAL holds
 
 
 def leaf_cells(page, hdr_off=0):
@@ -700,6 +704,19 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
         wp = db_path + "-wal"
         frames = list(wal_frames(wp, ps))
         newest = {pno: idx for idx, pno, _ in frames}      # the last frame of each page supersedes the earlier ones
+        # The main file's image of a page the WAL holds is an older version too: a row deleted after the last
+        # checkpoint, whose freed space in the WAL copy was reused, survives there whole.
+        for pno in sorted(newest):
+            if pno in fl or pno > npages:
+                continue
+            base = (pno - 1) * ps
+            page = data[base:base + ps]
+            for off in leaf_cells(page, 100 if pno == 1 else 0):
+                for r in carve_region(page, off, 1, shapes, ps, os.path.basename(db_path), pno,
+                                      MAIN_SUPERSEDED_REGION, min_text, usable):
+                    r["offset"] = base + off
+                    r["_version"] = "superseded"
+                    recs.append(r)
         for idx, pno, page in frames:
             stats["wal_frames"] += 1
             # A frame is a standalone page image at buffer offset 0, so walk it as

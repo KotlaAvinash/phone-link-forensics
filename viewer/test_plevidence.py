@@ -789,6 +789,33 @@ class EarlierVersions(unittest.TestCase):
             self.assertEqual(len(msg), 1, "identical copies of live rows (row 2, and row 1 as it is now) are dropped")
             self.assertEqual((st["deleted_only"], st["earlier_versions"]), (0, 1))
 
+    def test_main_file_image_of_a_page_the_wal_supersedes_is_decoded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = os.path.join(tmp, "src.db"), os.path.join(tmp, "phone.db")
+            w = wal_writer(src)
+            try:
+                w.execute(MSG_DDL)
+                w.execute("INSERT INTO message VALUES (1, 5, 'KEEP ME', 1)")
+                w.execute("INSERT INTO message VALUES (2, 5, 'DELETED SECRET aaaaaaaaaaaaaaaaaaaa', 1)")
+                w.execute("INSERT INTO message VALUES (4, 5, 'EDIT ME before', 1)")
+                w.execute("PRAGMA wal_checkpoint(TRUNCATE)")      # the main file now holds rows 2 and 4 as live cells
+                w.execute("DELETE FROM message WHERE message_id = 2")
+                w.execute("UPDATE message SET body = 'EDIT ME after', status = 3 WHERE message_id = 4")
+                w.execute("INSERT INTO message VALUES (3, 5, 'replacement text bbbbbbbbbbbbbbbbbbbbbbb', 1)")
+                copy_db_set(src, dst)
+            finally:
+                w.close()
+            self.assertIn(b"DELETED SECRET", read_bytes(dst))
+            recs, _ = plcarve.carve_db(dst)
+            msg = {r["rowid"]: r for r in recs if r["table"] == "message"}
+            self.assertEqual(sorted(msg), [2, 4], recs)          # 1 and 3 are live and unchanged
+            self.assertEqual(msg[2]["body"], "DELETED SECRET aaaaaaaaaaaaaaaaaaaa")
+            self.assertEqual(msg[2]["status"], plcarve.WAL_SUPERSEDED)
+            self.assertEqual((msg[2]["source_file"], msg[2]["region"]), ("phone.db", plcarve.MAIN_SUPERSEDED_REGION))
+            self.assertEqual(plcarve.MAIN_SUPERSEDED_REGION, "main-superseded-cell")
+            self.assertEqual((msg[4]["body"], msg[4]["col_status"]), ("EDIT ME before", 1))
+            self.assertEqual(msg[4]["status"], plcarve.WAL_EARLIER_VERSION)
+
     def test_carver_fields_are_not_overwritten_by_same_named_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "contacts.db")
