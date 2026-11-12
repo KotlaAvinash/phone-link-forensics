@@ -22,7 +22,8 @@ Not read: PlatformEncryptedKeyStorage.json (encryption keys, no device details) 
 bodies. Only the certificate count is shown.
 
 Everything is copied to a temporary folder first, each copy is re-hashed against its source,
-and databases are opened read-only. Standard library only.
+and databases are opened read-only. A database is copied with its -wal / -shm as one set, so
+its rows come from one moment (see PackageCopy._copy_set). Standard library only.
 """
 import datetime as dt
 import hashlib
@@ -46,6 +47,17 @@ INFER_WINDOW_S = 600   # fallback only: registration this close before a folder'
 STORED_PR3 = "stored: Metadata.Id = pairing folder GUID"
 SNAPSHOT_TRIES = 3     # copies of a file whose source keeps changing, before it is kept and flagged
 UNSTABLE = "n/a - source changed during copy"
+SET_SUFFIXES = ("-wal", "-shm")   # copied with the database they belong to, as one set
+SHM_NOT_VERIFIED = ("copied with its database - not verified against the source (a shared-memory index the "
+                    "running app rewrites)")
+
+
+class _Unreadable(Exception):
+    """A member of a copy set whose source could not be read."""
+
+    def __init__(self, rel, error):
+        super().__init__(rel)
+        self.rel, self.error = rel, error
 
 
 def norm_id(v):
@@ -243,15 +255,23 @@ class PackageCopy:
                     for d in [d for d in dirs if _is_link(os.path.join(root, d))]:
                         dirs.remove(d)    # do not descend
                         self.skipped.append(os.path.relpath(os.path.join(root, d), self.src))
-                    for f in files:
-                        rel = os.path.relpath(os.path.join(root, f), sp)
-                        dst = os.path.join(self.work, "Indexed", g, rel)
-                        try:
-                            mt = os.stat(os.path.join(root, f)).st_mtime   # taken before the copy, from the source
-                        except OSError:
-                            mt = None
-                        if self._copy(os.path.join(root, f), dst):
-                            info["files"].append(rel)
+                    names = set(files)
+                    for f in sorted(files):
+                        if f.endswith(SET_SUFFIXES) and f[:-len("-wal")] in names:
+                            continue      # copied with its database, as one set
+                        members = [f] + [f + s for s in SET_SUFFIXES if f + s in names]
+                        mts = {}
+                        for m in members:
+                            try:
+                                mts[m] = os.stat(os.path.join(root, m)).st_mtime   # before the copy, from the source
+                            except OSError:
+                                mts[m] = None
+                        rel_dir = os.path.relpath(root, sp)
+                        pairs = [(os.path.join(root, m), os.path.join(self.work, "Indexed", g, rel_dir, m))
+                                 for m in members]
+                        for m in self._copy_set(pairs):
+                            info["files"].append(os.path.normpath(os.path.join(rel_dir, m)))
+                            mt = mts.get(m)
                             if mt is not None:
                                 info["newest_file"] = mt if info["newest_file"] is None else max(info["newest_file"], mt)
                 self.folders[g] = info
@@ -261,46 +281,85 @@ class PackageCopy:
             raise IOError("a copy does not match its source hash")
 
     def _copy(self, src, dst):
-        """Copy one file and check it, the way plparse.stage does for a device folder: the source is hashed
-        before and after the copy, and the copy is retried while it keeps changing. A source that never
-        settles is kept and marked 'n/a - source changed during copy' (no source hash is claimed; the copy's
-        own hash is recorded). A source that cannot be read is an error row and is not copied. A copy that
-        differs from a source that did settle is 'NO' and stops the whole copy."""
-        rel = os.path.relpath(src, self.src)
-        if _is_link(src):
-            self.skipped.append(rel)
-            return False
-        if not os.path.isfile(src):
-            return False
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        """Copy one file on its own (a set of one - see _copy_set). True when it was copied."""
+        return bool(self._copy_set([(src, dst)]))
+
+    def _copy_set(self, pairs):
+        """Copy a database WITH its -wal / -shm as one set, the way plparse.stage does, and check it: the .db and
+        -wal are hashed before and after the whole set is copied, and the set is copied again (SNAPSHOT_TRIES)
+        while either changed - so the .db and -wal in the copy are from one moment and its rows from a consistent
+        set. A plain file is a set of one. pairs = [(source, copy)], the main file first. Returns the base names
+        of the members copied.
+
+        A set that never settles is kept and every member is marked 'n/a - source changed during copy' (no source
+        hash is claimed; the copy's own hash is recorded). If a member cannot be read, nothing of the set is
+        copied and each member is an error row. A copy that differs from a source that did settle is 'NO' and
+        stops the whole copy. A -shm beside its database is copied with the set but never verified: it is a
+        shared-memory index the running app rewrites constantly, so its row carries the copy's hash only."""
+        live = []
+        for i, (src, dst) in enumerate(pairs):
+            rel = os.path.relpath(src, self.src)
+            if _is_link(src):
+                self.skipped.append(rel)
+            elif os.path.isfile(src):
+                live.append((src, dst, rel, i > 0 and src.endswith("-shm")))   # (.., companion -shm)
+        if not live:
+            return []
+        for _, dst, _, _ in live:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+        def state():
+            out = []
+            for src, _, rel, shm in live:
+                if shm:
+                    continue
+                try:
+                    out.append(_sha(src) if os.path.isfile(src) else "")
+                except OSError as e:
+                    raise _Unreadable(rel, e)
+            return tuple(out)
+
         stable = False
         for _ in range(SNAPSHOT_TRIES):
             try:
-                before = _sha(src)
-            except OSError as e:
-                self.unreadable.append(rel)
-                self.verify.append({"file": rel, "source_sha256": "", "copy_sha256": "",
-                                    "copy_matches": f"error - source could not be read ({_why(e)})"})
-                if os.path.isfile(dst):
-                    os.remove(dst)     # a partial copy from an earlier try is not evidence
-                return False
-            shutil.copy2(src, dst)
+                before = state()
+            except _Unreadable as u:
+                for _, dst, rel, _ in live:
+                    self.unreadable.append(rel)
+                    why = (f"error - source could not be read ({_why(u.error)})" if rel == u.rel else
+                           f"error - not copied: {u.rel} in the same set could not be read")
+                    self.verify.append({"file": rel, "source_sha256": "", "copy_sha256": "", "copy_matches": why})
+                    if os.path.isfile(dst):
+                        os.remove(dst)     # a partial copy from an earlier try is not evidence
+                return []
+            for src, dst, _, _ in live:
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+                elif os.path.isfile(dst):
+                    os.remove(dst)         # gone from the source since an earlier try (a -wal after a checkpoint)
             try:
-                after = _sha(src)
-            except OSError:
+                after = state()
+            except _Unreadable:
                 after = None
             if after == before:
                 stable = True
                 break
-        mine = _sha(dst)
-        if stable:
-            self.verify.append({"file": rel, "source_sha256": before, "copy_sha256": "",
-                                "copy_matches": "yes" if mine == before else "NO"})
-        else:
-            self.unstable.append(rel)
-            self.verify.append({"file": rel, "source_sha256": "", "copy_sha256": mine,
-                                "copy_matches": UNSTABLE})
-        return True
+        copied, hashes = [], iter(before)
+        for src, dst, rel, shm in live:
+            source = "" if shm else next(hashes)
+            if not os.path.isfile(dst):
+                continue
+            mine = _sha(dst)
+            if not stable:
+                self.unstable.append(rel)
+                row = {"source_sha256": "", "copy_sha256": mine, "copy_matches": UNSTABLE}
+            elif shm:
+                row = {"source_sha256": "", "copy_sha256": mine, "copy_matches": SHM_NOT_VERIFIED}
+            else:
+                row = {"source_sha256": source, "copy_sha256": "", "copy_matches": "yes" if mine == source else "NO"}
+            self.verify.append({"file": rel, **row})
+            copied.append(os.path.basename(dst))
+        return copied
 
     def path(self, *parts):
         return os.path.join(self.work, *parts)
@@ -733,8 +792,10 @@ def _build(pc, g, View, ts_seconds, iso):
     v = View("PC_copies", "Linked phones - copies and hashes", "provenance",
              "".join(w + ". " for w in pc.warnings) +
              f"copied from {pc.src} to {pc.work} (PlatformEncryptedKeyStorage.json deliberately not copied; "
-             f"symlinks and junctions are not followed; a file whose source kept changing has no source hash, "
-             f"only the hash of the copy taken)",
+             f"symlinks and junctions are not followed; each database is copied with its -wal and -shm as one set, "
+             f"checked before and after the whole set and copied again while it changed; a file whose source kept "
+             f"changing has no source hash, only the hash of the copy taken; a -shm is never verified against its "
+             f"source)",
              ["file", "source_sha256", "copy_sha256", "copy_matches"],
              pc.verify + [{"file": f, "source_sha256": "", "copy_sha256": "",
                            "copy_matches": "skipped - symlink or junction, not followed"} for f in pc.skipped])

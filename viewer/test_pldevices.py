@@ -647,6 +647,127 @@ class SourceChangesDuringCopy(unittest.TestCase):
             self.assertEqual(w.left(), [])
 
 
+def wal_states(tmp):
+    """Two moments of one WAL-mode phone.db, as {'': db bytes, '-wal': wal bytes}:
+    s1 - 3 messages, all still in the WAL; s2 - those 3 checkpointed into the .db, then 2 conversations in the WAL.
+    An s1 .db with an s2 -wal would show 0 messages and 2 conversations: a set from two moments."""
+    src = os.path.join(tmp, "make", "phone.db")
+    os.makedirs(os.path.dirname(src))
+    c = sqlite3.connect(src)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA wal_autocheckpoint=0")
+    c.execute("CREATE TABLE message (id INTEGER, timestamp INTEGER)")
+    c.execute("CREATE TABLE conversation (id INTEGER)")
+    c.commit()
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def snap():
+        out = {}
+        for suf in ("", "-wal"):
+            with open(src + suf, "rb") as f:
+                out[suf] = f.read()
+        return out
+
+    c.executemany("INSERT INTO message VALUES (?, 0)", [(i,) for i in range(3)])
+    c.commit()
+    s1 = snap()
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    c.executemany("INSERT INTO conversation VALUES (?)", [(i,) for i in range(2)])
+    c.commit()
+    s2 = snap()
+    c.close()
+    return s1, s2
+
+
+def put(db_path, state):
+    for suf, data in state.items():
+        with open(db_path + suf, "wb") as f:
+            f.write(data)
+
+
+class DatabaseCopiedAsASet(unittest.TestCase):
+    """A .db and its -wal are copied as one set, with the before/after check over the set (as plparse.stage)."""
+
+    def run_with(self, change):
+        with WorkFolders(), tempfile.TemporaryDirectory() as tmp:
+            s1, s2 = wal_states(tmp)
+            lc = make_pkg(tmp, folders=[(G[0], {"System/Database/notes.txt": b"x"})])
+            db = os.path.join(lc, "Indexed", G[0], "System", "Database", "phone.db")
+            put(db, s1)
+            real = D.shutil.copy2
+            n = {"wal": 0}
+
+            def copy2(a, b, *x, **k):
+                if a.endswith("phone.db-wal"):
+                    n["wal"] += 1
+                    change(n["wal"], db, s1, s2)       # the app writes after the .db was copied, before the -wal
+                return real(a, b, *x, **k)
+
+            with mock.patch.object(D.shutil, "copy2", copy2):
+                g = R.Graph()
+                _, pc = D.build(lc, g, R.View, R.ts_seconds, R.iso)
+            pc.close()
+            return g, s2
+
+    def test_wal_changing_between_the_db_and_the_wal_is_copied_again_as_a_set(self):
+        def once(n, db, s1, s2):
+            if n == 1:
+                put(db, s2)                            # a checkpoint plus new rows, between the two copies
+        g, s2 = self.run_with(once)
+        row = g.views["PC_devices"].rows[0]
+        self.assertEqual(row["DataRows"], 5, row)      # s2 as a whole: 3 messages + 2 conversations
+        rows = {r["file"].replace("\\", "/").split("/")[-1]: r for r in g.views["PC_copies"].rows}
+        for name, suf in (("phone.db", ""), ("phone.db-wal", "-wal")):
+            self.assertEqual(rows[name]["copy_matches"], "yes", rows[name])
+            self.assertEqual(rows[name]["source_sha256"], hashlib.sha256(s2[suf]).hexdigest())
+        self.assertNotIn("changed while it was being copied", g.views["PC_devices"].basis)
+
+    def test_a_set_that_never_settles_is_flagged_as_a_whole(self):
+        def always(n, db, s1, s2):
+            put(db, s2 if n % 2 else s1)
+        g, _ = self.run_with(always)
+        rows = {r["file"].replace("\\", "/").split("/")[-1]: r for r in g.views["PC_copies"].rows}
+        for name in ("phone.db", "phone.db-wal"):
+            self.assertEqual(rows[name]["copy_matches"], D.UNSTABLE, rows[name])
+            self.assertEqual(rows[name]["source_sha256"], "")
+            self.assertTrue(rows[name]["copy_sha256"])
+        self.assertEqual(rows["notes.txt"]["copy_matches"], "yes")
+        basis = g.views["PC_devices"].basis
+        self.assertIn("changed while it was being copied", basis)
+        self.assertIn("phone.db-wal", basis)
+
+    def test_shm_is_copied_with_its_set_but_never_verified_against_the_source(self):
+        with WorkFolders(), tempfile.TemporaryDirectory() as tmp:
+            s1, _ = wal_states(tmp)
+            lc = make_pkg(tmp, folders=[(G[0], {})])
+            db = os.path.join(lc, "Indexed", G[0], "phone.db")
+            put(db, s1)
+            with open(db + "-shm", "wb") as f:
+                f.write(b"\0" * 64)
+            real = D.shutil.copy2
+
+            def copy2(a, b, *x, **k):
+                out = real(a, b, *x, **k)
+                if a.endswith("-shm"):
+                    with open(a, "ab") as f:           # the running app rewrites its shared-memory index
+                        f.write(b"\1")
+                return out
+
+            with mock.patch.object(D.shutil, "copy2", copy2):
+                pc = D.PackageCopy(lc)
+            try:
+                rows = {r["file"].replace("\\", "/").split("/")[-1]: r for r in pc.verify}
+                self.assertTrue(os.path.isfile(pc.path("Indexed", G[0], "phone.db-shm")))
+            finally:
+                pc.close()
+        self.assertEqual(rows["phone.db"]["copy_matches"], "yes")
+        self.assertEqual(rows["phone.db-wal"]["copy_matches"], "yes")
+        self.assertEqual(rows["phone.db-shm"]["source_sha256"], "")
+        self.assertTrue(rows["phone.db-shm"]["copy_sha256"])
+        self.assertIn("not verified", rows["phone.db-shm"]["copy_matches"])
+        self.assertEqual(pc.unstable, [])
+
+
 class Links(unittest.TestCase):
     def link(self, target, link):
         try:
