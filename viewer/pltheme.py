@@ -12,12 +12,16 @@ PALETTES            {"light": {role: "#rrggbb"}, "dark": {...}}; both have the s
                       views, disabled text), accent / on_accent (main buttons), button / on_button (other buttons),
                       select_bg / select_fg (selected rows and text), heading_bg (column headings), hover, border,
                       outline (the frame of the filter panel),
-                      trough / thumb (scrollbars), warn and status (status-bar text), tip_bg / tip_fg (hover hints),
+                      trough / thumb / thumb_active (scrollbars), edge (the border of text boxes and drop-downs),
+                      warn and status (status-bar text), tip_bg / tip_fg (hover hints),
                       on_kind (badge text), deleted (reserved: deleted rows), and kind.<k> for every kind of view
                       (kind.check is red, kind.cross orange, kind.in-table green ...). Meaning never rests on colour
                       alone: every badge, scope and group also says it in words.
 TEXT_PAIRS, AA      every (text role, background role) the viewer draws; failing_pairs(name) lists the pairs of a
                     palette under AA (4.5:1, WCAG 2 AA for normal text) as (fg, bg, ratio).
+NON_TEXT_PAIRS, UI_AA
+                    controls against their neighbours (scrollbar thumb on trough, text-box borders on their fill
+                    and surfaces); failing_ui_pairs(name) lists those under 3:1 (WCAG 2.1 1.4.11, non-text).
 contrast(a, b)      WCAG 2 contrast ratio of two '#rrggbb' colours; hue(c) the hue in degrees.
 MODES, next_mode(m) "light", "dark", "system" (follow Windows), in the order Ctrl+Shift+L cycles through them.
 read_apps_use_light_theme()
@@ -67,7 +71,8 @@ PALETTES = {
         "ink": "#13233a", "muted": "#55697e", "faint": "#66727f",
         "accent": "#00766c", "on_accent": "#ffffff", "button": "#1e3a56", "on_button": "#ffffff",
         "select_bg": "#4a6984", "select_fg": "#ffffff", "heading_bg": "#e3e9ef", "hover": "#d3dde7",
-        "border": "#b8c4d0", "outline": "#16293f", "trough": "#e3e9ef", "thumb": "#c3ceda",
+        "border": "#b8c4d0", "outline": "#16293f", "trough": "#e3e9ef", "thumb": "#717e8c",
+        "thumb_active": "#55697e", "edge": "#717e8c",
         "warn": "#ffb74d", "status": "#9fb3c8", "tip_bg": "#13233a", "tip_fg": "#ffffff",
         "on_kind": "#ffffff", "deleted": "#ad1457",
         "kind.pc": "#5d4037", "kind.conn": "#37474f", "kind.table": "#1e3a56", "kind.in-table": "#2e7d32",
@@ -79,7 +84,8 @@ PALETTES = {
         "ink": "#e6edf3", "muted": "#9aa7b4", "faint": "#8b949e",
         "accent": "#2ec4b6", "on_accent": "#0d1117", "button": "#30363d", "on_button": "#e6edf3",
         "select_bg": "#1f4e79", "select_fg": "#ffffff", "heading_bg": "#2d333b", "hover": "#373e47",
-        "border": "#444c56", "outline": "#768390", "trough": "#1b1f24", "thumb": "#3d444d",
+        "border": "#444c56", "outline": "#768390", "trough": "#1b1f24", "thumb": "#6e7681",
+        "thumb_active": "#8b949e", "edge": "#768390",
         "warn": "#ffb454", "status": "#9aa7b4", "tip_bg": "#30363d", "tip_fg": "#e6edf3",
         "on_kind": "#0d1117", "deleted": "#f778ba",
         "kind.pc": "#d7a98c", "kind.conn": "#a7b6c2", "kind.table": "#79b8ff", "kind.in-table": "#7ee787",
@@ -94,6 +100,12 @@ TEXT_PAIRS = [
     ("on_accent", "accent"), ("on_button", "button"), ("select_fg", "select_bg"),
     ("ink", "heading_bg"), ("ink", "hover"), ("tip_fg", "tip_bg"), ("deleted", "field"), ("deleted", "bg"),
 ] + [p for k in KINDS for p in ((f"kind.{k}", "bg"), (f"kind.{k}", "field"), ("on_kind", f"kind.{k}"))]
+
+# Controls, not text (WCAG 2.1, 1.4.11 non-text contrast, 3:1): a scrollbar thumb against its trough (also while
+# pointed at), and the border of a text box or drop-down against its own fill and every surface it sits on.
+UI_AA = 3.0
+NON_TEXT_PAIRS = [("thumb", "trough"), ("thumb_active", "trough"), ("edge", "field"), ("edge", "bg"),
+                  ("edge", "panel"), ("outline", "bg")]
 
 
 # ---------------------------------------------------------------- colour arithmetic
@@ -122,6 +134,12 @@ def failing_pairs(name):
     """[(text role, background role, ratio)] of palette `name` under AA."""
     pal = PALETTES[name]
     return [(f, b, contrast(pal[f], pal[b])) for f, b in TEXT_PAIRS if contrast(pal[f], pal[b]) < AA]
+
+
+def failing_ui_pairs(name):
+    """[(control role, neighbour role, ratio)] of palette `name` under UI_AA (3:1, non-text contrast)."""
+    pal = PALETTES[name]
+    return [(f, b, contrast(pal[f], pal[b])) for f, b in NON_TEXT_PAIRS if contrast(pal[f], pal[b]) < UI_AA]
 
 
 # ---------------------------------------------------------------- light, dark, follow Windows
@@ -363,10 +381,10 @@ def style_ttk(root, pal):
            foreground=[("active", ink)])
     st.configure("TScrollbar", background=pal["thumb"], troughcolor=pal["trough"], bordercolor=pal["trough"],
                  lightcolor=pal["thumb"], darkcolor=pal["thumb"], arrowcolor=ink, gripcount=0)
-    st.map("TScrollbar", background=[("disabled", pal["trough"]), ("pressed", pal["hover"]),
-                                     ("active", pal["hover"])], arrowcolor=[("disabled", faint)])
+    st.map("TScrollbar", background=[("disabled", pal["trough"]), ("pressed", pal["thumb_active"]),
+                                     ("active", pal["thumb_active"])], arrowcolor=[("disabled", faint)])
     st.configure("TCombobox", fieldbackground=field, background=pal["heading_bg"], foreground=ink, arrowcolor=ink,
-                 bordercolor=pal["border"], lightcolor=field, darkcolor=field, insertcolor=ink,
+                 bordercolor=pal["edge"], lightcolor=field, darkcolor=field, insertcolor=ink,
                  selectbackground=pal["select_bg"], selectforeground=pal["select_fg"])
     st.map("TCombobox", fieldbackground=[("disabled", bg), ("readonly", field)],
            foreground=[("disabled", faint), ("readonly", ink)],
@@ -396,7 +414,7 @@ _LABEL = {"background": "@surface", "foreground": "@text", "activebackground": "
 _TEXTBOX = {"background": "field", "foreground": "ink", "insertbackground": "ink", "selectbackground": "select_bg",
             "selectforeground": "select_fg", "inactiveselectbackground": "select_bg", "disabledbackground": "bg",
             "disabledforeground": "faint", "readonlybackground": "field", "buttonbackground": "heading_bg",
-            "activebackground": "hover", "highlightbackground": "border"}
+            "activebackground": "hover", "highlightbackground": "edge"}
 CLASS_ROLES = {
     "Tk": {"background": "@surface"}, "Toplevel": {"background": "@surface"},
     "ComboboxPopdown": {"background": "field"},
@@ -409,7 +427,7 @@ CLASS_ROLES = {
     "Entry": _TEXTBOX, "Spinbox": _TEXTBOX, "Text": _TEXTBOX, "Listbox": _TEXTBOX,
     "Canvas": {"background": "field", "selectbackground": "select_bg", "selectforeground": "select_fg",
                "insertbackground": "ink"},
-    "Scrollbar": {"background": "thumb", "troughcolor": "trough", "activebackground": "hover"},
+    "Scrollbar": {"background": "thumb", "troughcolor": "trough", "activebackground": "thumb_active"},
     "Scale": {"background": "thumb", "troughcolor": "trough", "activebackground": "hover", "foreground": "@text"},
     "Menu": {"background": "field", "foreground": "ink", "activebackground": "select_bg",
              "activeforeground": "select_fg", "selectcolor": "ink", "disabledforeground": "faint"},

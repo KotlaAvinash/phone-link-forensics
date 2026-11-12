@@ -438,6 +438,11 @@ class Viewer(tk.Tk):
         st.configure("Treeview", font="PL.body")
         st.configure("Treeview.Heading", font="PL.bold")
         st.configure("Nav.Treeview", font="PL.body")
+        # text boxes: a flat 1-px border in the theme's "edge" colour (3:1 against the fill and the surface), not
+        # Tk's sunken shades of the white fill
+        for cls in ("Entry", "Spinbox"):
+            self.option_add(f"*{cls}.relief", "flat")
+            self.option_add(f"*{cls}.highlightThickness", 1)
         self._row_heights()
 
     def _row_heights(self):

@@ -2564,6 +2564,27 @@ class ViewerReview3Test(unittest.TestCase):
         self.assertIn("ignoring 1 implausible future date", p.error_lbl.cget("text"))
         self.assertIn("implausible", V.HINTS["range"])
 
+    # ---- 16 controls: 3:1 against what is next to them (WCAG 2.1, 1.4.11 non-text contrast)
+    def test_scrollbars_and_text_box_borders_meet_3_to_1(self):
+        self.assertEqual(T.UI_AA, 3.0)
+        for pair in (("thumb", "trough"), ("thumb_active", "trough"), ("edge", "field"), ("edge", "bg"),
+                     ("edge", "panel")):
+            self.assertIn(pair, T.NON_TEXT_PAIRS)
+        for name in T.PALETTES:
+            bad = T.failing_ui_pairs(name)
+            self.assertEqual(bad, [], f"{name}: " + ", ".join(f"{f} on {b} {r:.2f}" for f, b, r in bad))
+        self.assertEqual(T.failing_pairs("light"), [])         # text stays at 4.5:1
+        app = self.app
+        for name in ("light", "dark"):
+            app.apply_theme(name)
+            app.update()
+            for e in (app.filter_entry, app.from_entry, app.nearby_spin):
+                self.assertEqual(int(e.cget("highlightthickness")), 1, str(e))     # the border is drawn ...
+                self.assertEqual(norm(app, e.cget("highlightbackground")), T.PALETTES[name]["edge"])   # ... in edge
+            st = V.ttk.Style(app)
+            self.assertEqual(norm(app, st.lookup("TScrollbar", "background")), T.PALETTES[name]["thumb"])
+            self.assertEqual(norm(app, st.lookup("TCombobox", "bordercolor")), T.PALETTES[name]["edge"])
+
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
         app = self.app
