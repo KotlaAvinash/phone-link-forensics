@@ -413,7 +413,7 @@ class Viewer(tk.Tk):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h = min(1600, int(sw * 0.92)), min(960, int(sh * 0.88))
         self.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(0, (sh - h) // 3)}")
-        self.basis_wrap = w - self.px(400)
+        self.basis_wrap = w - self.px(400)        # the first wrap width; the labels rewrap to their own width
         self._style()
         self._layout()
         self._layout_filters()
@@ -620,6 +620,7 @@ class Viewer(tk.Tk):
         self.basis_lbl = tk.Label(top, text="", anchor="w", justify="left", wraplength=self.basis_wrap,
                                   font="PL.italic")
         self.basis_lbl.pack(fill="x", padx=12, pady=(4, 6))
+        self._rewrap(self.basis_lbl)
         wrap = tk.Frame(top)
         wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.table = ttk.Treeview(wrap, show="headings", selectmode="browse")
@@ -1025,8 +1026,10 @@ class Viewer(tk.Tk):
         self.table["columns"] = v.cols
         for c in v.cols:
             self.table.heading(c, text=c, command=lambda c=c: self.open_filter(c))
-            self.table.column(c, width=self.px(260 if c in WIDE else max(80, min(220, 9 * len(c) + 40))), anchor="w",
-                              stretch=False)
+            width = self.px(260 if c in WIDE else max(80, min(220, 9 * len(c) + 40)))
+            if self.col_type(c, vid) == F.DATE:        # the seconds were cut off at about 112 px
+                width = max(width, self.time_col_width())
+            self.table.column(c, width=width, anchor="w", stretch=False)
         if select_index is not None and self.filter_var.get():
             self._quiet = True
             try:
@@ -1133,6 +1136,7 @@ class Viewer(tk.Tk):
         self.filter_lbl = tk.Label(self.table.master.master, text="", anchor="w", justify="left",
                                    wraplength=self.basis_wrap, font="PL.body")
         self.filter_lbl.pack(fill="x", padx=12, pady=(0, 4), before=self.table.master)
+        self._rewrap(self.filter_lbl)
         self.nav.column("#0", width=self.px(230))      # the names stretch into what is left after the counts
         for seq in ("<Control-L>", "<Control-Shift-L>"):   # light -> dark -> follow Windows -> light
             self.bind(seq, lambda e: self.cycle_theme())
@@ -1162,6 +1166,18 @@ class Viewer(tk.Tk):
                 self.detail.bind(seq, lambda e: (self.detail.tk_focusPrev().focus_set(), "break")[1])
             except tk.TclError:
                 pass
+
+    def _rewrap(self, label):
+        """A wrapping label wraps at its CURRENT width (the window and the panes can be resized)."""
+        def fit(e):
+            w = max(50, e.width - self.px(4))
+            if int(label.cget("wraplength")) != w:
+                label.config(wraplength=w)
+        label.bind("<Configure>", fit, add="+")
+
+    def time_col_width(self):
+        """Pixels a time column needs for a whole 'YYYY-MM-DD HH:MM:SS' in the table font, plus the cell padding."""
+        return tkfont.nametofont("PL.body", root=self).measure("0000-00-00 00:00:00") + self.px(16)
 
     def _hint(self, widget, text):
         self.hints[widget] = text

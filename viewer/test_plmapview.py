@@ -2514,6 +2514,27 @@ class ViewerReview3Test(unittest.TestCase):
         with self.assertRaises(F.FilterError):
             F.make_condition(F.NUMBER, "between", "9007199254740993", "9007199254740992")
 
+    # ---- 13 text that was cut off
+    def test_description_lines_rewrap_on_resize_and_time_columns_fit_seconds(self):
+        import tkinter.font as tkfont
+        app = self.sized(1600, 950)
+        app.show("E_calls")
+        app.update()
+        for w in (app.basis_lbl, app.filter_lbl):
+            self.assertLessEqual(int(w.cget("wraplength")), w.winfo_width())
+            self.assertGreater(int(w.cget("wraplength")), w.winfo_width() - app.px(40))
+        app.geometry("1100x700")
+        app.update()
+        for w in (app.basis_lbl, app.filter_lbl):
+            self.assertLessEqual(int(w.cget("wraplength")), w.winfo_width(), "rewrapped at the new width")
+            self.assertGreater(int(w.cget("wraplength")), 50)
+        body = tkfont.nametofont("PL.body", root=app)
+        for vid in ("E_calls", "N_notifications", "E_photos"):
+            app.show(vid)
+            for c in app.date_cols(vid):
+                need = max(body.measure(F.cell_text(r.get(c))[:19]) for r in app.g.views[vid].rows) + app.px(8)
+                self.assertGreaterEqual(int(app.table.column(c, "width")), need, (vid, c))
+
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
         app = self.app
