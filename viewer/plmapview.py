@@ -563,6 +563,11 @@ class Viewer(tk.Tk):
         self.src_lbl.pack(fill="x", padx=14, pady=(0, 6))
         self.src_lbl.bind("<Configure>", lambda e: self._fit_src())
 
+        # the status bar (hash check, copy warnings) is packed BEFORE the stretching body: on a small window the
+        # body is what gets cut, never the status bar
+        self.status = role(tk.Label(self, text="", anchor="w", font="PL.small", padx=12), zone="panel",
+                           foreground="status")
+        self.status.pack(fill="x", side="bottom")
         body = tk.PanedWindow(self, orient="horizontal", sashwidth=4)
         body.pack(fill="both", expand=True)
         left = role(tk.Frame(body), zone="field")
@@ -647,9 +652,6 @@ class Viewer(tk.Tk):
         self.links.bind("<KP_Enter>", self.on_jump)
         self.link_targets = {}
 
-        self.status = role(tk.Label(self, text="", anchor="w", font="PL.small", padx=12), zone="panel",
-                           foreground="status")
-        self.status.pack(fill="x", side="bottom")
         self._tag_colours()
 
     # ------------------------------------------------------------ data

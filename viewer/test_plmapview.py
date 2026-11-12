@@ -2232,6 +2232,17 @@ class ViewerReview3Test(unittest.TestCase):
                 self.assertGreaterEqual(width, bold.measure(app.links.heading(c, "text")), (w, c))
             app.on_close(warn=False)
 
+    # ---- 2 the status bar on smaller windows
+    def test_status_bar_stays_visible_on_small_windows(self):
+        for w, h in ((1366, 740), (1280, 680), (1000, 560)):
+            app = self.sized(w, h)
+            app._status("hash check text")
+            app.update()
+            self.assertTrue(app.status.winfo_ismapped(), (w, h))
+            self.assertGreater(app.status.winfo_height(), 1)
+            self.assertLessEqual(app.status.winfo_y() + app.status.winfo_height(), app.winfo_height(), (w, h))
+            app.on_close(warn=False)
+
 
 if __name__ == "__main__":
     unittest.main()
