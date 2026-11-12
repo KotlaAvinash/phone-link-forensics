@@ -240,6 +240,32 @@ class ChangingShm(unittest.TestCase):
                 ev.close()
 
 
+class InputShapes(unittest.TestCase):
+    """find_device_dirs accepts all four documented --input shapes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="pltest-shapes-")
+        self.guid = pldemo.PAIRING_GUIDS[0]
+        self.pkg = os.path.join(self.tmp, "Microsoft.YourPhone_8wekyb3d8bbwe")
+        self.indexed = os.path.join(self.pkg, "LocalCache", "Indexed")
+        self.device = os.path.join(self.indexed, self.guid)
+        self.dbdir = os.path.join(self.device, "System", "Database")
+        os.makedirs(self.dbdir)
+        sqlite3.connect(os.path.join(self.dbdir, "phone.db")).close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def found(self, path):
+        return [(label, os.path.normcase(d)) for label, d in P.find_device_dirs(path)]
+
+    def test_every_documented_shape_finds_the_same_device(self):
+        want = [(self.guid, os.path.normcase(self.dbdir))]
+        for shape in (self.pkg, self.indexed, self.device):
+            self.assertEqual(self.found(shape), want, shape)
+        self.assertEqual(self.found(self.dbdir), [("Database", os.path.normcase(self.dbdir))])
+
+
 class OddFolderNames(unittest.TestCase):
     def test_hash_and_percent_in_path(self):
         with tempfile.TemporaryDirectory() as tmp:

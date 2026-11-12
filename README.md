@@ -171,7 +171,8 @@ Every phone that has ever been linked to the PC through Phone Link, **including 
 How they connect:
 - **Stored:** a trust relationship's partner ID is `<prefix>_<metadata Id>`.
 - **Stored:** `hosted_app_ids.device_id` is the pairing folder's name.
-- **Inferred by time:** a phone's details are matched to the closest pairing folder created within 10 minutes after registration. Windows PC entries and entries without a phone OS are never matched, and nothing is matched when the folder times look like copy times. The match must be one-to-one: if a phone has several such folders, or a folder several such phones, all candidates are listed as ambiguous and none is linked.
+- **Stored:** a phone's `Metadata.Id` is its pairing folder's GUID (checked on real data: the linked phone's Id was exactly its `Indexed\<GUID>` folder name, and Phone Link removes the entry when the phone is unlinked).
+- **Fallback, inferred by time:** only for a phone whose Id is missing or not a GUID - it is matched to the closest pairing folder created within 10 minutes after registration and labelled as an inference. An Id that is a folder GUID with no such folder (its data was removed) is never matched by time. Windows PC entries and entries without a phone OS are never matched, nothing is matched by time when the folder times look like copy times, and the match must be one-to-one: if a phone has several such folders, or a folder several such phones, all candidates are listed as ambiguous and none is linked.
 
 ### Phone connections: USB cable and Bluetooth (this PC)
 
@@ -186,7 +187,7 @@ Phones that reached the PC **without** Phone Link. This section reads the **live
 | Bluetooth services | Each profile a device offered: Hands-Free, Phonebook Access, Message Access, A2DP, … |
 | Bluetooth Low Energy devices | Low Energy devices and the GATT services they offered |
 | AutoPlay devices | The label AutoPlay showed this Windows user |
-| First driver install per device | The earliest time each device ID was installed, across the current and rotated setup logs. **Category** separates connected devices (USB, USB storage, portable device, Bluetooth) from internal hardware (for example USB root hubs; a USB device using the HID driver is flagged as possibly built in) |
+| First driver install per device | The earliest time each device ID was installed, across the current and rotated setup logs. Only ids of the kinds a phone can appear as are listed (USB, USB storage, portable device, Bluetooth, Bluetooth LE); PCI, ACPI, HID, ROOT and other ids are not. **Category** says only what the id tells: *USB-enumerated (external or built in)* (with *input device (HID)* when the HID driver is used), *USB storage*, *portable device (SWD-WPD)*, *Bluetooth*, *Bluetooth LE*, or *USB root hub (internal)* |
 | Connection events | Event-log entries with Windows' own meaning for each ID. **MatchedField** says which event field matched the device: when it is `ParentDeviceInstanceId` the event is about a child device and the meaning says so. At most the newest 10,000 events of each log are read; the view's banner states the cap and says when it was reached |
 | Same device seen in several places | USB, MTP, Bluetooth and AutoPlay rows that share a ContainerID (Windows' own ID for one physical device), listed together |
 | Locations this account could not read | Registry keys, logs or event channels that were denied or failed to read, so you can tell an empty result from a failed one |

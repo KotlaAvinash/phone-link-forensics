@@ -155,7 +155,7 @@ NAV = {  # view -> (group, sub-heading or None, name in the list)
     "PR4": ("linked", None, "Pairing history"),
     "PR1": ("linked", "between", "Phone \u2192 trusted connection"),
     "PR2": ("linked", "between", "Pairing \u2192 streamed apps"),
-    "PR3": ("linked", "between", "Phone \u2192 pairing (matched by time)"),
+    "PR3": ("linked", "between", "Phone \u2192 pairing folder"),
     # this PC: cable and Bluetooth
     "C_phones": ("conn", None, "Phones connected (summary)"),
     "C_usb": ("conn", None, "USB devices"),

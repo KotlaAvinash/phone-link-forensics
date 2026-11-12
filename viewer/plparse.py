@@ -141,6 +141,10 @@ def find_device_dirs(root):
     if has_dbs(root):
         out.append((os.path.basename(root.rstrip("\\/")) or "root", root))
         return out
+    own = os.path.join(root, "System", "Database")       # a device folder: Indexed\{GUID}
+    if has_dbs(own):
+        out.append((os.path.basename(root.rstrip("\\/")) or "root", own))
+        return out
 
     cands = [root,
              os.path.join(root, "LocalCache", "Indexed"),
