@@ -12,7 +12,9 @@ Recovers deleted rows from three kinds of dead space inside a .db file:
                        the start of cell content on a live page.
 
 It also carves WAL frames, which hold page images the main file may no longer
-have.
+have. In a frame that a later frame of the same page supersedes, the LIVE cells
+are decoded too: a row deleted since then survives there whole (status
+wal-superseded). Older copies of rows that are still live are not reported.
 
 WHY SCHEMA-GUIDED. A deleted cell is unlinked, so there is no pointer to it.
 Carving therefore means recognising a record by its own shape. A SQLite record
@@ -168,6 +170,26 @@ def page_regions(data, ps, pno, freelist, hdr_offset=None):
         if sz >= 4:
             yield ("freeblock", o + 4, sz - 4)
         fb = nxt
+
+
+WAL_SUPERSEDED = "wal-superseded"           # status: a row from an older WAL frame of a page, no longer live
+SUPERSEDED_REGION = "wal-superseded-cell"   # region: a live cell of a WAL frame that a later frame supersedes
+
+
+def leaf_cells(page, hdr_off=0):
+    """Start offsets of the cells of a table-leaf page image, from its cell-pointer array (empty for other pages)."""
+    if hdr_off + 8 > len(page) or page[hdr_off] != 0x0D:
+        return []
+    n = struct.unpack(">H", page[hdr_off + 3:hdr_off + 5])[0]
+    out = []
+    for i in range(n):
+        p = hdr_off + 8 + 2 * i
+        if p + 2 > len(page):
+            break
+        off = struct.unpack(">H", page[p:p + 2])[0]
+        if hdr_off + 8 + 2 * n <= off < len(page):
+            out.append(off)
+    return out
 
 
 def wal_frames(path, ps):
@@ -542,7 +564,9 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
 
     if include_wal:
         wp = db_path + "-wal"
-        for idx, pno, page in wal_frames(wp, ps):
+        frames = list(wal_frames(wp, ps))
+        newest = {pno: idx for idx, pno, _ in frames}      # the last frame of each page supersedes the earlier ones
+        for idx, pno, page in frames:
             stats["wal_frames"] += 1
             # A frame is a standalone page image at buffer offset 0, so walk it as
             # page 1 (base=0) but apply the file-header skip only if it really IS
@@ -551,6 +575,12 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
             for kind, off, ln in page_regions(page, ps, 1, set(), hdr_offset=hdr_off):
                 recs += carve_region(page, off, ln, shapes, ps,
                                      os.path.basename(wp), pno, "wal-" + kind, min_text, usable)
+            if newest[pno] != idx:
+                # An older version of the page: its LIVE cells are rows as they were then, and a row since deleted
+                # survives here whole. Each cell is decoded where its pointer says it starts.
+                for off in leaf_cells(page, hdr_off):
+                    recs += carve_region(page, off, 1, shapes, ps, os.path.basename(wp), pno,
+                                         SUPERSEDED_REGION, min_text, usable)
 
     # Plumbing tables are matched (so their records are not mislabelled as some
     # other table of the same width) but dropped here unless explicitly wanted.
@@ -571,8 +601,12 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
             live_cache[t] = live_rowids(db_path, t, stats["errors"])
         if live_cache[t] is None:
             r["status"] = UNKNOWN_LIVE
+        elif r["rowid"] in live_cache[t]:
+            if r["region"] == SUPERSEDED_REGION:
+                continue          # an older frame's copy of a row that is still live: every live row has one
+            r["status"] = "also_live"
         else:
-            r["status"] = "also_live" if r["rowid"] in live_cache[t] else "deleted_or_overwritten"
+            r["status"] = WAL_SUPERSEDED if r["region"] == SUPERSEDED_REGION else "deleted_or_overwritten"
         uniq.append(r)
     stats["json_carved"] = 0
     if json_pass and has_notification_json(shapes):

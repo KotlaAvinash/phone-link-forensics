@@ -718,6 +718,30 @@ class ParseSchemaTolerance(unittest.TestCase):
             self.assertIn("calling.db", w[0])
 
 
+class WalSuperseded(unittest.TestCase):
+    def test_rows_in_an_older_frame_of_a_page_are_decoded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live_dir, copy_dir = os.path.join(tmp, "live"), os.path.join(tmp, "copy")
+            os.makedirs(copy_dir)
+            w = wal_source(live_dir)                       # 5 rows, committed, all only in the -wal
+            try:
+                w.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds default to secure_delete ON
+                w.execute("DELETE FROM t WHERE id IN (2, 4)")
+                w.commit()                                 # a later frame of the same page, without rows 2 and 4
+                for suf in ("", "-wal", "-shm"):
+                    shutil.copyfile(os.path.join(live_dir, "phone.db" + suf), os.path.join(copy_dir, "phone.db" + suf))
+            finally:
+                w.close()
+            recs, st = plcarve.carve_db(os.path.join(copy_dir, "phone.db"))
+            gone = [r for r in recs if r["table"] == "t" and r["status"] != "also_live"]
+            self.assertEqual(sorted(r["v"] for r in gone), ["row1", "row3"])        # ids 2 and 4, once each
+            for r in gone:
+                self.assertEqual(r["status"], plcarve.WAL_SUPERSEDED)
+                self.assertEqual(r["region"], "wal-superseded-cell")
+                self.assertEqual(r["source_file"], "phone.db-wal")
+            self.assertEqual(plcarve.WAL_SUPERSEDED, "wal-superseded")
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
