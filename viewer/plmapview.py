@@ -1730,10 +1730,13 @@ class FilterPanel(tk.Frame):
         values = [v.rows[i].get(col) for i in F.filter_indices(v.rows, others)]
         self.all_values = [r.get(col) for r in v.rows]
         items, blanks = F.distinct(values, ctype)
+        self.cur = cur
         self.undated = sum(1 for x in values if not F.is_blank(x) and F.parse_time(x) is None) \
             if ctype == F.DATE else 0
+        # values the other filters hide keep their ticks (all_keys): reopening and pressing OK changes nothing
         self.checklist = F.Checklist(items, blanks, ticked=cur.values if cur else None,
-                                     keep_blanks=cur.blanks if cur else True)
+                                     keep_blanks=cur.blanks if cur else True,
+                                     all_keys={F.value_key(x, ctype) for x in self.all_values if not F.is_blank(x)})
         self._groups = {}
         font, small = "PL.body", "PL.small"
         flat = dict(relief="flat", anchor="w", font=font, padx=6)
@@ -2021,10 +2024,22 @@ class FilterPanel(tk.Frame):
             except F.FilterError as e:
                 self.error_lbl.config(text=f"Not applied: {e}")
                 return False
+        if self._unchanged(cond):            # nothing was touched: keep the filter exactly as it was
+            self.app.close_panel()
+            return True
         values, blanks = self.checklist.result()
         self.app.apply_column_filter(self.vid, self.col, F.ColumnFilter(self.ctype, values, blanks, cond))
         self.app.close_panel()
         return True
+
+    def _unchanged(self, cond):
+        """True when OK would only re-apply the filter the panel was opened with."""
+        cur = self.cur
+        if cur is None or not cur.active or self.checklist.changed or bool(self.blanks_var.get()) != cur.blanks:
+            return False
+        old = (cur.cond.op, cur.cond.a, cur.cond.b) if cur.cond else None
+        new = (cond.op, cond.a, cond.b) if cond else None
+        return old == new
 
     def cancel(self):
         self.app.close_panel()

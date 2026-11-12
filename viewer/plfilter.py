@@ -10,7 +10,7 @@ only by unticking "(Blanks)".
     make_condition(type, op, a, b)       -> Condition (raises FilterError with a message for the examiner)
     ColumnFilter(type, values, blanks, cond).match(value) / .describe(col)
     filter_indices(rows, [(col, ColumnFilter)], text, cols) / shown_indices(...)
-    distinct(values, type), Checklist(items, blanks), group_days(keys)
+    distinct(values, type), Checklist(items, blanks, ticked, keep_blanks, all_keys), group_days(keys)
     preset_range(values, preset)         -> (from, to) relative to the NEWEST value, never to now
     visible(text)                        -> invisible and control characters shown as <U+200E>
 """
@@ -397,20 +397,30 @@ def distinct(values, ctype):
 
 class Checklist:
     """The ticks of a value list. Every value starts ticked. search() narrows what is shown and what Select All
-    and OK act on; result() is (values or None, keep blanks)."""
+    and OK act on; result() is (values or None, keep blanks).
 
-    def __init__(self, items, blanks=0, ticked=None, keep_blanks=True):
+    all_keys: every value of the whole column, when the list shows fewer (other filters hide some rows). A value
+    that is not listed keeps the tick it had - ticked when the old filter (ticked) had it, or when there was no
+    old filter - so reopening a filter and pressing OK never drops values another filter happens to hide.
+    changed: True once a tick, Select All or a search was used."""
+
+    def __init__(self, items, blanks=0, ticked=None, keep_blanks=True, all_keys=None):
         self.items = list(items)
         self.keys = [k for k, _ in self.items]
         self.counts = dict(self.items)
         self.blank_count = blanks
-        self.ticked = set(self.keys) if ticked is None else set(ticked) & set(self.keys)
+        listed = set(self.keys)
+        self.all_keys = listed | set(all_keys or ())
+        self.hidden = (self.all_keys - listed) if ticked is None else (set(ticked) & self.all_keys) - listed
+        self.ticked = set(self.keys) if ticked is None else set(ticked) & listed
         self.blanks = keep_blanks
         self.query = ""
         self._matches = self.keys
+        self.changed = False
 
     def search(self, text):
         self.query = (text or "").strip().casefold()
+        self.changed = self.changed or bool(self.query)
         q = self.query
         self._matches = self.keys if not q else [k for k in self.keys if q in k.casefold() or
                                                  q in visible(k).casefold()]
@@ -424,12 +434,14 @@ class Checklist:
         return m[:cap], len(m) > cap, len(m)
 
     def set(self, key, on):
+        self.changed = True
         (self.ticked.add if on else self.ticked.discard)(key)
 
     def toggle(self, key):
         self.set(key, key not in self.ticked)
 
     def set_all(self, on):
+        self.changed = True
         for k in self._matches:
             self.set(k, on)
         if not self.query:
@@ -450,7 +462,8 @@ class Checklist:
 
     def result(self):
         sel = self.ticked & set(self._matches) if self.query else set(self.ticked)
-        values = None if sel >= set(self.keys) else frozenset(sel)
+        sel |= self.hidden           # values not in the list keep their old tick
+        values = None if sel >= self.all_keys else frozenset(sel)
         return values, self.blanks
 
 

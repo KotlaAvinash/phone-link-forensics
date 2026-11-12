@@ -2285,6 +2285,43 @@ class ViewerReview3Test(unittest.TestCase):
         self.assertIsNone(app._filter_job)
         self.assertEqual(len(app.table.get_children()), 2)
 
+    # ---- 5 reopening a filter and pressing OK
+    def test_checklist_keeps_the_ticks_of_values_other_filters_hide(self):
+        # the list shows only Incoming (another filter hides the rest); the old filter was Incoming only
+        cl = F.Checklist([("Incoming", 1)], 0, ticked={"Incoming"}, all_keys={"Incoming", "Outgoing", "Missed"})
+        self.assertEqual(cl.result(), (frozenset({"Incoming"}), True))
+        cl = F.Checklist([("Incoming", 1)], 0, ticked={"Incoming", "Missed"},
+                         all_keys={"Incoming", "Outgoing", "Missed"})
+        cl.set("Incoming", False)
+        self.assertEqual(cl.result(), (frozenset({"Missed"}), True))      # Missed was not in the list: kept
+        cl = F.Checklist([("Incoming", 1)], 0, ticked=None, all_keys={"Incoming", "Outgoing"})
+        cl.set("Incoming", False)
+        self.assertEqual(cl.result(), (frozenset({"Outgoing"}), True))    # no old filter: hidden values stay ticked
+        cl.set("Incoming", True)
+        self.assertEqual(cl.result(), (None, True))
+
+    def test_reopening_a_filter_and_pressing_ok_keeps_it(self):
+        app = self.app
+        app.show("E_calls")
+        app.apply_column_filter("E_calls", "Type", F.ColumnFilter(F.TEXT, values={"Incoming"}))
+        app.apply_column_filter("E_calls", "Number", F.ColumnFilter(F.TEXT, values={"+1-555-0102"}))
+        self.assertEqual(len(app.cur_rows), 1)
+        old = app.view_state("E_calls")["filters"]["Type"]
+        p = app.open_filter("Type")
+        self.assertEqual(p.checklist.keys, ["Incoming"])      # the value list shows what the Number filter leaves
+        p.ok()
+        f = app.view_state("E_calls")["filters"].get("Type")
+        self.assertIs(f, old, "nothing changed: OK keeps the filter as it was")
+        app.apply_column_filter("E_calls", "Number", None)
+        self.assertEqual(sorted(app.g.views["E_calls"].rows[i]["Type"] for i in app.cur_rows), ["Incoming"] * 3)
+        # a change to a listed value keeps the hidden values' ticks
+        app.apply_column_filter("E_calls", "Type", F.ColumnFilter(F.TEXT, values={"Incoming", "Missed"}))
+        app.apply_column_filter("E_calls", "Number", F.ColumnFilter(F.TEXT, values={"+1-555-0102"}))
+        p = app.open_filter("Type")
+        p.toggle_item("v:Incoming")
+        p.ok()
+        self.assertEqual(app.view_state("E_calls")["filters"]["Type"].values, frozenset({"Missed"}))
+
 
 if __name__ == "__main__":
     unittest.main()
