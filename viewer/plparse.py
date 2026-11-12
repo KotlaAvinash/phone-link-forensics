@@ -37,8 +37,13 @@ Design notes that matter forensically:
     warnings say so. Per-device carved rows carry scope=device.
   * DeviceMetadataStorage.json is also package-wide. Each device's report and
     acquisition.json get only the entry/entries whose Metadata.Id equals the
-    folder GUID, or an explicit "no metadata entry matches this device folder";
-    the other entries are listed separately, headed as package-wide. Both
+    folder GUID (verified on real data: Metadata.Id is the pairing folder's
+    GUID, and Phone Link removes a phone's entry when it is unlinked), or the
+    note "no DeviceMetadataStorage.json entry has this folder's GUID as its Id";
+    the other entries are listed separately under "Other entries in
+    DeviceMetadataStorage.json (their Id is not this folder's GUID)" - nothing
+    more is claimed about them. (pldemo's synthetic package is being corrected
+    separately to use the folder GUID as Id.) Both
     package-wide inputs are hashed and recorded under "package_files" in every
     acquisition.json and in _package\\acquisition.json.
   * Recoverability is judged from the file: freelist_count and whether the free
@@ -199,8 +204,9 @@ def find_metadata(root):
 
 
 META_FILE = "DeviceMetadataStorage.json"
-NO_META_MATCH = ("no metadata entry matches this device folder (the phone may have been unlinked). "
-                 "The package's other entries are listed separately as package-wide.")
+NO_META_MATCH = ("no DeviceMetadataStorage.json entry has this folder's GUID as its Id (Phone Link removes a phone's "
+                 "entry when it is unlinked). The file's other entries are listed separately.")
+OTHER_META_HEADING = "Other entries in DeviceMetadataStorage.json (their Id is not this folder's GUID)"
 
 
 def read_metadata(meta_src, pkg_acq):
@@ -979,9 +985,8 @@ the analysing SQLite connection, not a property stored in the evidence file.</p>
 
 <h2>Device</h2><p>%(meta_note)s</p><pre class=mono>%(meta)s</pre>
 
-<h2>Package-wide: other phones in DeviceMetadataStorage.json (NOT this device folder)</h2>
-<p class=muted>These entries belong to the Phone Link package as a whole - their Metadata.Id does not equal
-this device folder's GUID. They are listed for context only and say nothing about this device.</p>
+<h2>%(meta_other_heading)s</h2>
+<p class=muted>The file is package-wide. The Metadata.Id of each entry below is not this device folder's GUID.</p>
 <pre class=mono>%(meta_other)s</pre>
 
 <h2>SIM / subscriber</h2>%(sims)s
@@ -998,6 +1003,7 @@ Validate every join against the databases before relying on it in a report.</foo
         "digits": digits, "meta_note": esc(dev_meta.get("note", "")),
         "meta": esc(json.dumps(dev_meta.get("entries", []), indent=1, default=str)[:2500]),
         "meta_other": esc(json.dumps(other_meta, indent=1, default=str)[:2500]),
+        "meta_other_heading": OTHER_META_HEADING,         # a fixed string of this tool, not data
         "sims": table(d["sims"], ["subscription_id", "own_number", "carrier", "country", "sim_slot",
                                   "roaming", "default_sms", "default_voice", "rcs_supported"]),
         "tl": table(tl, ["timestamp_utc", "event", "party", "detail", "source"], 60),

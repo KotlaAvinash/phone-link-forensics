@@ -1254,6 +1254,11 @@ class FullTrustScope(unittest.TestCase):
         self.assertTrue([x for x in w if "not a pairing-folder GUID" in x], w)
 
 
+NO_ENTRY = ("no DeviceMetadataStorage.json entry has this folder's GUID as its Id (Phone Link removes a phone's "
+            "entry when it is unlinked)")
+OTHERS_HEADING = "Other entries in DeviceMetadataStorage.json (their Id is not this folder's GUID)"
+
+
 class MetadataScope(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -1267,14 +1272,15 @@ class MetadataScope(unittest.TestCase):
     def test_device_without_entry_says_so(self):
         md = read_acq(self.out, GUID_B)["device_metadata"]
         self.assertEqual(md["entries"], [])
-        self.assertIn("no metadata entry matches this device folder", md["note"])
+        self.assertIn(NO_ENTRY, md["note"])
         self.assertNotIn("AcmeCorpA", json.dumps(md))
         others = read_acq(self.out, GUID_B)["package_metadata_other_entries"]
         self.assertEqual({e["id"] for e in others}, {GUID_A, "not-a-folder-id"})
         html_b = read_text(os.path.join(self.out, GUID_B, "report.html"))
-        dev, sep, pkg = html_b.partition("Package-wide")
-        self.assertTrue(sep, "the package's other entries need their own package-wide heading")
-        self.assertIn("no metadata entry matches this device folder", dev)
+        dev, sep, pkg = html_b.partition(OTHERS_HEADING)
+        self.assertTrue(sep, "the package's other entries need their own heading")
+        self.assertIn(NO_ENTRY.replace("'", "&#x27;"), dev)
+        self.assertNotIn("say nothing about this device", html_b)     # only that their Id is not the folder's
         self.assertNotIn("AcmeCorpA", dev)
         self.assertIn("AcmeCorpA", pkg)
 
@@ -1283,7 +1289,7 @@ class MetadataScope(unittest.TestCase):
         self.assertEqual([e["make"] for e in md["entries"]], ["AcmeCorpA"])
         self.assertNotIn("OtherMakerQ", json.dumps(md))
         html_a = read_text(os.path.join(self.out, GUID_A, "report.html"))
-        dev, _, _ = html_a.partition("Package-wide")
+        dev, _, _ = html_a.partition(OTHERS_HEADING)
         self.assertIn("AcmeCorpA", dev)
         self.assertNotIn("OtherMakerQ", dev)
 
