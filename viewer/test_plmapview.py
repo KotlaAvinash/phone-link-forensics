@@ -2458,6 +2458,46 @@ class ViewerReview3Test(unittest.TestCase):
         app.update()
         self.assertIs(app.focus_get(), app.table)
 
+    # ---- 11 Enter on a focused button, Tab inside the panel
+    def test_enter_presses_the_focused_button_and_tab_stays_in_the_panel(self):
+        app = self.sized(1366, 740)
+        app.show("E_calls")
+
+        def key(widget, seq):
+            widget.focus_force()
+            app.update()
+            widget.event_generate(seq)
+            app.update()
+        p = app.open_filter("Type")
+        p.toggle_item("v:Missed")
+        key(p.cancel_btn, "<Return>")
+        self.assertIsNone(app.panel)
+        self.assertNotIn("Type", app.view_state("E_calls")["filters"], "Enter on Cancel cancels")
+        p = app.open_filter("Type")
+        p.toggle_item("v:Missed")
+        key(p.sort_btns[1], "<Return>")
+        self.assertIsNone(app.panel)
+        self.assertEqual(app.view_state("E_calls")["sort"], ("Type", True))
+        self.assertNotIn("Type", app.view_state("E_calls")["filters"], "Enter on a sort button sorts only")
+        p = app.open_filter("Type")
+        p.toggle_item("v:Missed")
+        key(p.search_entry, "<Return>")                       # elsewhere Enter is OK
+        self.assertEqual(len(app.cur_rows), 4)
+        p = app.open_filter("Type")
+        order = p.focus_order()
+        self.assertEqual(order[0], p.sort_btns[0])
+        self.assertEqual(order[-2:], [p.ok_btn, p.cancel_btn])
+        self.assertNotIn(p.b_entry, order)                    # disabled: skipped
+        key(p.cancel_btn, "<Tab>")
+        self.assertIs(app.focus_get(), order[0])               # wraps inside the panel
+        key(order[0], "<Shift-Tab>")
+        self.assertIs(app.focus_get(), p.cancel_btn)
+        key(p.search_entry, "<Tab>")
+        self.assertIs(app.focus_get(), order[order.index(p.search_entry) + 1])
+        self.assertIsNotNone(app.panel)
+        key(p.ok_btn, "<Escape>")
+        self.assertIsNone(app.panel)
+
 
 if __name__ == "__main__":
     unittest.main()

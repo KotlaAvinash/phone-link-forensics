@@ -1800,7 +1800,8 @@ class FilterPanel(tk.Frame):
     """The Excel-style AutoFilter drop-down of one column, placed under its heading: sort (worded for the column's
     type), clear, a typed condition, a search box, the value list with row counts - (Select All) first and (Blanks)
     last; a date column is grouped Year > Month > Day with tri-state ticks - and OK / Cancel. Esc cancels, Enter
-    applies. The logic is in plfilter; this only draws it."""
+    presses the focused button (else applies), Tab and Shift+Tab stay inside the panel. The logic is in
+    plfilter; this only draws it."""
 
     def __init__(self, app, vid, col):
         super().__init__(app, highlightthickness=1, bd=0)
@@ -1925,6 +1926,12 @@ class FilterPanel(tk.Frame):
         self.bind_class("PLFilterPanel", "<Escape>", lambda e: self._key(e, "cancel"))
         self.bind_class("PLFilterPanel", "<Return>", lambda e: self._key(e, "ok"))
         self.bind_class("PLFilterPanel", "<KP_Enter>", lambda e: self._key(e, "ok"))
+        self.bind_class("PLFilterPanel", "<Tab>", lambda e: self._tab(e, 1))
+        for seq in ("<Shift-Tab>", "<ISO_Left_Tab>"):
+            try:
+                self.bind_class("PLFilterPanel", seq, lambda e: self._tab(e, -1))
+            except tk.TclError:      # a key this platform does not have
+                pass
         self.bind_class("PLFilterPanel", "<Control-Left>", lambda e: self._next_col(e, -1))
         self.bind_class("PLFilterPanel", "<Control-Right>", lambda e: self._next_col(e, 1))
         self._keys(self)
@@ -1940,9 +1947,37 @@ class FilterPanel(tk.Frame):
             self._keys(c)
 
     def _key(self, e, what):
+        """Esc cancels; Enter presses the focused button (OK, Cancel, a sort, Clear, a quick range), else OK."""
         panel = getattr(e.widget.winfo_toplevel(), "panel", None) if hasattr(e.widget, "winfo_toplevel") else None
         if panel is not None:
-            panel.cancel() if what == "cancel" else panel.ok()
+            if what == "cancel":
+                panel.cancel()
+            elif e.widget.winfo_class() == "Button":
+                if str(e.widget.cget("state")) != "disabled":
+                    e.widget.invoke()
+            else:
+                panel.ok()
+        return "break"
+
+    def focus_order(self):
+        """The panel's controls in the order Tab visits them (disabled and hidden ones left out)."""
+        ws = self.sort_btns + [self.clear_btn, self.op_combo, self.a_entry, self.b_entry] + self.preset_btns +             [self.blanks_chk, self.search_entry, self.list, self.ok_btn, self.cancel_btn]
+        out = []
+        for w in ws:
+            try:
+                state = str(w.cget("state")) if "state" in w.keys() else "normal"
+            except tk.TclError:
+                state = "normal"
+            if state != "disabled" and w.winfo_manager():      # packed or gridded (not hidden)
+                out.append(w)
+        return out
+
+    def _tab(self, e, step):
+        """Tab and Shift+Tab move inside the open panel (a focus trap until OK, Cancel or Esc)."""
+        order = self.focus_order()
+        if order:
+            i = order.index(e.widget) if e.widget in order else (-1 if step > 0 else 0)
+            order[(i + step) % len(order)].focus_set()
         return "break"
 
     def _next_col(self, e, step):
