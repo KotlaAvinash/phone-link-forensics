@@ -4,6 +4,7 @@
 """
 import csv
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -148,8 +149,12 @@ class DatabaseFirstTest(unittest.TestCase):
         self.assertEqual(sorted(views), sorted(self.app.g.views))          # every view is listed once
         for vid in views:
             text = self.app.nav.item(vid, "text")
-            self.assertNotRegex(text, r"^[A-Z]{1,3}\d+\b|\.db\b|_|->", vid)  # no codes, files, raw names
-            self.assertEqual(self.app.nav.set(vid, "rows"), f"{len(self.app.g.views[vid].rows):,}")
+            plain = re.sub(r"\s*\(content_sequence\)$", "", text)   # the one raw name the owner asked to show
+            self.assertNotRegex(plain, r"^[A-Z]{1,3}\d+\b|\.db\b|_|->", vid)  # no codes, files, raw names
+            v = self.app.g.views[vid]
+            self.assertEqual(self.app.nav.set(vid, "rows"), V.nav_count_text(v, len(v.rows)))
+            if getattr(v, "problems", None) is None and getattr(v, "matched", None) is None:
+                self.assertEqual(self.app.nav.set(vid, "rows"), f"{len(v.rows):,}")
         unnamed = [v for v in self.app.g.views if v not in V.NAV and not v.startswith("M_")]
         self.assertEqual(unnamed, [], "give these views a plain name in plmapview.NAV")
         self.app.show("R03")
@@ -1116,6 +1121,556 @@ class PipelineTest(unittest.TestCase):
         rng = ("N", F.ColumnFilter(F.NUMBER, cond=F.make_condition(F.NUMBER, "less than", "3")))
         got = F.shown_indices(rows, ["Name", "N"], {"Name": F.TEXT, "N": F.NUMBER}, {}, extra=[rng])
         self.assertEqual(got, [0, 1, 2])
+
+
+# ==================================================================== the AutoFilter panel and the filter UI
+class AutoFilterTest(unittest.TestCase):
+    """Excel-style heading panels on the synthetic demo (window hidden unless a test needs key events)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = pldemo.build(os.path.join(self.tmp.name, "device"))
+        self.apps = []
+        self.app = self.make([("demo", self.src)])
+
+    def make(self, devices, withdraw=True, **kw):
+        app = V.Viewer(devices, **kw)
+        if withdraw:
+            app.withdraw()
+        app.update()
+        self.apps.append(app)
+        return app
+
+    def tearDown(self):
+        for a in self.apps:
+            try:
+                a.on_close(warn=False)
+            except Exception:
+                pass
+        self.tmp.cleanup()
+
+    def col(self, name, app=None):
+        app = app or self.app
+        v = app.g.views[app.cur_vid]
+        return [v.rows[int(k)].get(name) for k in app.table.get_children()]
+
+    # ---- markers and panel contents
+    def test_every_heading_has_a_dropdown_marker(self):
+        for vid in ("E_contacts", "E_calls", "N_notifications", "R23"):
+            self.app.show(vid)
+            for c in self.app.g.views[vid].cols:
+                text = self.app.table.heading(c, "text")
+                self.assertTrue(text.startswith(c), (vid, c, text))
+                self.assertIn(V.DROP_MARK, text, (vid, c))
+                self.assertNotIn(V.FILTER_MARK, text)
+
+    def test_text_column_panel_tick_values_and_clear(self):
+        app = self.app
+        app.show("E_contacts")
+        p = app.open_filter("Name")
+        self.assertIs(app.panel, p)
+        self.assertEqual(p.ctype, F.TEXT)
+        self.assertEqual([b.cget("text") for b in p.sort_btns], ["Sort A \u2192 Z", "Sort Z \u2192 A"])
+        self.assertEqual(str(p.clear_btn.cget("state")), "disabled")           # not filtered yet
+        self.assertEqual(list(p.op_combo.cget("values")), ["(none)"] + F.OPS[F.TEXT])
+        items = p.list.get_children()
+        self.assertEqual(items[0], "all")
+        self.assertIn("(Select All)", p.list.item("all", "text"))
+        self.assertIn("v:Alice Example", items)
+        self.assertIn("(1)", p.list.item("v:Alice Example", "text"))           # its row count
+        p.toggle_item("v:Alice Example")
+        self.assertIn(V.UNCHECKED, p.list.item("v:Alice Example", "text"))
+        p.ok()
+        self.assertIsNone(app.panel)
+        self.assertNotIn("Alice Example", self.col("Name"))
+        self.assertEqual(len(app.table.get_children()), 5)
+        self.assertIn(V.FILTER_MARK, app.table.heading("Name", "text"))
+        self.assertEqual(app.nav.set("E_contacts", "rows"), "5 of 6")
+        self.assertIn("5 of 6 rows", app.filter_lbl.cget("text"))
+        self.assertIn("Name is one of", app.filter_lbl.cget("text"))
+        p = app.open_filter("Name")
+        self.assertEqual(str(p.clear_btn.cget("state")), "normal")
+        self.assertIn('"Name"', p.clear_btn.cget("text"))
+        p.clear()
+        self.assertEqual(len(app.table.get_children()), 6)
+        self.assertNotIn(V.FILTER_MARK, app.table.heading("Name", "text"))
+        self.assertEqual(app.nav.set("E_contacts", "rows"), "6")
+
+    def test_search_narrows_the_value_list_and_ok_keeps_the_matches(self):
+        app = self.app
+        app.show("E_contacts")
+        p = app.open_filter("Name")
+        p.search_var.set("bob")
+        values = [i for i in p.list.get_children() if i.startswith("v:")]
+        self.assertEqual(values, ["v:Bob Example"])
+        p.ok()
+        self.assertEqual(self.col("Name"), ["Bob Example"])
+
+    def test_sort_from_the_panel_shows_an_arrow_and_survives_filtering(self):
+        app = self.app
+        app.show("E_calls")
+        p = app.open_filter("StartUTC")
+        self.assertEqual([b.cget("text") for b in p.sort_btns], ["Sort Oldest \u2192 Newest", "Sort Newest \u2192 Oldest"])
+        p.sort(descending=True)
+        self.assertIsNone(app.panel)
+        self.assertIn(V.SORT_DOWN, app.table.heading("StartUTC", "text"))
+        self.assertEqual(self.col("CallID"), [5, 4, 3, 2, 1])
+        p = app.open_filter("Type")
+        p.op_var.set("does not contain")
+        p.a_var.set("miss")
+        p.ok()
+        self.assertEqual(self.col("CallID"), [5, 3, 2, 1])                # the sort order stays after filtering
+        app.filter_var.set("Alice")
+        self.assertEqual(self.col("CallID"), [2, 1])                      # and after a text search
+        app.sort_by("CallID")
+        self.assertIn(V.SORT_UP, app.table.heading("CallID", "text"))
+        self.assertNotIn(V.SORT_DOWN, app.table.heading("StartUTC", "text"))   # one sorted column at a time
+        self.assertIn("sorted by CallID", app.filter_lbl.cget("text"))
+
+    def test_number_condition_and_invalid_input_is_shown_inline(self):
+        app = self.app
+        app.show("E_calls")
+        p = app.open_filter("CallID")
+        self.assertEqual(p.ctype, F.NUMBER)
+        self.assertEqual(p.sort_btns[0].cget("text"), "Sort Smallest \u2192 Largest")
+        p.op_var.set("greater than")
+        p.a_var.set("abc")
+        p.ok()
+        self.assertIs(app.panel, p, "bad input keeps the panel open")
+        self.assertIn("not a number", p.error_lbl.cget("text"))
+        self.assertEqual(len(app.table.get_children()), 5)                 # nothing applied
+        p.a_var.set("2")
+        p.ok()
+        self.assertIsNone(app.panel)
+        self.assertEqual(self.col("CallID"), [3, 4, 5])
+        self.assertIn("CallID greater than 2", app.filter_lbl.cget("text"))
+
+    def test_date_panel_tree_between_and_blanks_kept_until_unticked(self):
+        app = self.app
+        v = app.g.views["E_calls"]
+        v.rows.append({"CallID": 99, "StartUTC": None, "Type": "Missed"})     # an undated call
+        app.show("E_calls")
+        p = app.open_filter("StartUTC")
+        self.assertEqual(p.ctype, F.DATE)
+        self.assertEqual(list(p.op_combo.cget("values")), ["(none)"] + F.OPS[F.DATE])
+        self.assertIn("y:2030", p.list.get_children())                        # Year > Month > Day
+        self.assertEqual(p.list.get_children("y:2030"), ("m:2030-01",))
+        self.assertEqual(p.list.get_children("m:2030-01"), ("v:2030-01-01",))
+        self.assertIn("January", p.list.item("m:2030-01", "text"))
+        self.assertEqual(p.list.get_children()[-1], "blanks")
+        self.assertIn("(Blanks)", p.list.item("blanks", "text"))
+        p.op_var.set("between")
+        p.a_var.set("2030-01-01 13:00")
+        p.b_var.set("2030-01-01 17:00")
+        p.refresh_note()
+        self.assertIn("(Blanks: 1 row kept)", p.blanks_chk.cget("text"))
+        p.ok()
+        self.assertEqual(self.col("CallID"), [2, 3, 99])                       # the undated call is kept
+        self.assertIn("StartUTC between 2030-01-01 13:00 and 2030-01-01 17:00 (blanks kept)",
+                      app.filter_lbl.cget("text"))
+        p = app.open_filter("StartUTC")
+        self.assertEqual(p.op_var.get(), "between")                            # the panel shows the filter in force
+        self.assertEqual(p.a_var.get(), "2030-01-01 13:00")
+        p.toggle_item("blanks")
+        self.assertFalse(p.blanks_var.get())
+        self.assertIn("removed", p.blanks_chk.cget("text"))
+        p.ok()
+        self.assertEqual(self.col("CallID"), [2, 3])
+
+    def test_date_tree_parent_is_tri_state(self):
+        app = self.app
+        app.show("E_photos")
+        p = app.open_filter("TakenUTC")
+        self.assertEqual(p.list.get_children("m:2030-01"), ("v:2030-01-01", "v:2030-01-04"))
+        p.toggle_item("v:2030-01-04")
+        self.assertIn(V.PARTIAL, p.list.item("m:2030-01", "text"))
+        self.assertIn(V.PARTIAL, p.list.item("y:2030", "text"))
+        self.assertIn(V.PARTIAL, p.list.item("all", "text"))
+        p.toggle_item("m:2030-01")                                            # a partial month ticks all its days
+        self.assertIn(V.CHECKED, p.list.item("v:2030-01-04", "text"))
+        p.toggle_item("y:2030")
+        self.assertIn(V.UNCHECKED, p.list.item("v:2030-01-01", "text"))
+        p.toggle_item("v:2030-01-01")
+        p.ok()
+        self.assertEqual(self.col("MediaID"), [1, 2])
+
+    def test_presets_are_relative_to_the_newest_value_in_the_column(self):
+        app = self.app
+        app.show("E_photos")
+        p = app.open_filter("TakenUTC")
+        p.preset("Last 24 h of data")
+        self.assertEqual(p.op_var.get(), "between")
+        self.assertEqual((p.a_var.get(), p.b_var.get()), ("2030-01-03 23:20:00", "2030-01-04 23:20:00"))
+        p.ok()
+        self.assertEqual(self.col("MediaID"), [3])
+
+    def test_filters_on_several_columns_combine_with_and(self):
+        app = self.app
+        app.show("E_calls")
+        p = app.open_filter("Type")
+        p.toggle_item("v:Outgoing")
+        p.ok()
+        p = app.open_filter("ContactName")
+        values = [i for i in p.list.get_children() if i.startswith("v:")]
+        self.assertNotIn("v:" + "", values)
+        p.search_var.set("alice")
+        self.assertIn("blanks", p.list.get_children())          # (Blanks) stays listed and ticked while searching
+        p.ok()
+        self.assertEqual(self.col("CallID"), [2, 4])               # call 4 has no contact name: a blank, kept
+        p = app.open_filter("ContactName")
+        p.toggle_item("blanks")
+        p.ok()
+        self.assertEqual(self.col("CallID"), [2])
+        self.assertEqual(app.nav.set("E_calls", "rows"), "1 of 5")
+
+    def test_cancel_changes_nothing(self):
+        app = self.app
+        app.show("E_contacts")
+        p = app.open_filter("Name")
+        p.toggle_item("all")
+        p.cancel()
+        self.assertIsNone(app.panel)
+        self.assertEqual(len(app.table.get_children()), 6)
+        self.assertNotIn(V.FILTER_MARK, app.table.heading("Name", "text"))
+
+    def test_escape_cancels_and_enter_applies(self):
+        app = self.make([("demo", self.src)], withdraw=False)
+        app.show("E_contacts")
+        p = app.open_filter("Name")
+        p.toggle_item("v:Alice Example")
+        app.update()
+        p.search_entry.focus_force()
+        app.update()
+        p.search_entry.event_generate("<Escape>")
+        app.update()
+        self.assertIsNone(app.panel)
+        self.assertEqual(len(app.table.get_children()), 6)
+        p = app.open_filter("Name")
+        p.toggle_item("v:Alice Example")
+        p.search_entry.focus_force()
+        app.update()
+        p.search_entry.event_generate("<Return>")
+        app.update()
+        self.assertIsNone(app.panel)
+        self.assertEqual(len(app.table.get_children()), 5)
+
+    def test_value_list_is_capped_at_10000_with_a_note_and_search_covers_all(self):
+        app = self.app
+        rows = [{"Val": f"v{i:05d}"} for i in range(F.SHOWN_CAP + 50)]
+        app.g.add_view(V.R.View("T_big", "big synthetic table", "table", "synthetic", ["Val"], rows))
+        app.show("T_big")
+        p = app.open_filter("Val")
+        values = [i for i in p.list.get_children() if i.startswith("v:")]
+        self.assertEqual(len(values), F.SHOWN_CAP)
+        self.assertIn("10,000", p.cap_lbl.cget("text"))
+        p.search_var.set("v10049")
+        self.assertEqual([i for i in p.list.get_children() if i.startswith("v:")], ["v:v10049"])
+        p.ok()
+        self.assertEqual(self.col("Val"), ["v10049"])
+
+    # ---- persistence
+    def test_filters_and_sort_are_kept_per_view_and_after_a_rebuild(self):
+        app = self.app
+        app.show("E_calls")
+        app.open_filter("DurationSec").sort(descending=False)
+        p = app.open_filter("Type")
+        p.toggle_item("v:Missed")
+        p.ok()
+        want = self.col("CallID")
+        self.assertEqual(want, [5, 2, 3, 1])
+        app.show("E_contacts")
+        self.assertEqual(len(app.table.get_children()), 6)              # filters belong to their own view
+        app.show("E_calls")
+        self.assertEqual(self.col("CallID"), want)
+        self.assertIn(V.SORT_UP, app.table.heading("DurationSec", "text"))
+        self.assertIn(V.FILTER_MARK, app.table.heading("Type", "text"))
+        app.window_min.set("17")
+        app.rebuild()                                                   # new graph, same filters and sort
+        self.assertEqual(self.col("CallID"), want)
+        self.assertEqual(app.nav.set("E_calls", "rows"), "4 of 5")
+
+    def test_clear_all_filters(self):
+        app = self.app
+        app.show("E_contacts")
+        p = app.open_filter("Name")
+        p.toggle_item("v:Alice Example")
+        p.ok()
+        app.show("E_calls")
+        p = app.open_filter("Type")
+        p.toggle_item("v:Missed")
+        p.ok()
+        app.range_from.set("2030-01-01 13:00")
+        app.apply_range()
+        app.filter_var.set("Bob")
+        self.assertEqual(len(app.table.get_children()), 1)
+        app.clear_btn.invoke()
+        self.assertEqual(len(app.table.get_children()), 5)
+        self.assertEqual(app.filter_var.get(), "")
+        self.assertEqual(app.range_from.get(), "")
+        self.assertEqual(app.nav.set("E_contacts", "rows"), "6")
+        self.assertIn("No filters", app.filter_lbl.cget("text"))
+
+    def test_jump_to_a_row_hidden_by_filters_clears_that_views_filters(self):
+        app = self.app
+        app.show_cross.set(True)
+        app.show("E_contacts")
+        p = app.open_filter("Name")
+        p.toggle_item("v:Alice Example")
+        p.ok()
+        idx = next(i for i, r in enumerate(app.g.views["E_calls"].rows) if r["CallID"] == 1)
+        app.show("E_calls", select_index=idx)
+        app.on_row()
+        target = next(iid for iid, t in app.link_targets.items() if t == ("contact", 1))
+        app.links.selection_set(target)
+        app.on_jump()
+        self.assertEqual(app.cur_vid, "E_contacts")
+        sel = app.table.selection()
+        self.assertTrue(sel)
+        self.assertEqual(app.g.views["E_contacts"].rows[int(sel[0])]["Name"], "Alice Example")
+        self.assertIn("cleared", app.filter_lbl.cget("text"))
+
+    # ---- case-wide date range
+    def test_case_wide_date_range_applies_to_every_views_time_column(self):
+        app = self.app
+        app.g.views["E_calls"].rows.append({"CallID": 99, "StartUTC": "", "Type": "Missed"})
+        app.show("E_calls")
+        self.assertEqual(app.main_time_col("E_calls"), "StartUTC")
+        self.assertIsNone(app.main_time_col("E_sims"))
+        app.range_from.set("2030-01-01 13:00")
+        app.range_to.set("2030-01-01 17:00")
+        app.apply_range()
+        self.assertEqual(self.col("CallID"), [2, 3, 99])                # undated kept
+        self.assertEqual(app.nav.set("E_calls", "rows"), "3 of 6")
+        self.assertEqual(app.nav.set("E_sms", "rows"), "0 of 3")
+        self.assertEqual(app.nav.set("E_sims", "rows"), "1")            # no time column: untouched
+        self.assertIn("between 2030-01-01 13:00 and 2030-01-01 17:00", app.filter_lbl.cget("text"))
+        app.range_keep.set(False)
+        app.apply_range()
+        self.assertEqual(self.col("CallID"), [2, 3])
+        p = app.open_filter("CallID")                                   # column filters apply on top
+        p.op_var.set("less than")
+        p.a_var.set("3")
+        p.ok()
+        self.assertEqual(self.col("CallID"), [2])
+        app.clear_range()
+        self.assertEqual(self.col("CallID"), [1, 2])
+
+    def test_case_wide_range_picker_and_bad_input(self):
+        app = self.app
+        app.show("E_photos")
+        self.assertEqual(list(app.range_col_combo.cget("values")), ["TakenUTC", "SyncedUTC"])
+        self.assertEqual(app.range_col_combo.get(), "TakenUTC")
+        app.range_to.set("2030-01-01 12:30")
+        app.apply_range()
+        self.assertEqual(self.col("MediaID"), [1])
+        app.range_col_combo.set("SyncedUTC")
+        app.on_range_col()
+        self.assertEqual(self.col("MediaID"), [1, 2, 3])
+        self.assertEqual(app.main_time_col("E_photos"), "SyncedUTC")
+        app.range_from.set("31/12/2030")
+        app.apply_range()
+        self.assertIn("not a date", app.range_err.cget("text"))
+        self.assertEqual(self.col("MediaID"), [1, 2, 3])                 # the old range still applies, not a half one
+
+    def test_case_wide_presets_are_relative_to_the_newest_time_in_the_case(self):
+        app = self.app
+        app.range_preset("Last 24 h of data")
+        newest = max(F.parse_time(r.get(app.main_time_col(vid)))
+                     for vid, v in app.g.views.items() if app.main_time_col(vid)
+                     for r in v.rows if F.parse_time(r.get(app.main_time_col(vid))))
+        self.assertEqual(app.range_to.get(), newest.strftime("%Y-%m-%d %H:%M:%S"))
+        self.assertTrue(app.range_from.get())
+
+    # ---- counts
+    def test_nav_count_text(self):
+        R = V.R
+        plain = R.View("X", "x", "table", "", ["a"], [{}] * 686)
+        self.assertEqual(V.nav_count_text(plain, 686), "686")
+        self.assertEqual(V.nav_count_text(plain, 112), "112 of 686")
+        check = R.View("C", "c", "check", "", ["a"], [{}] * 28)
+        check.problems = 2
+        self.assertEqual(V.nav_count_text(check, 28), "2 issues / 28")
+        self.assertEqual(V.nav_count_text(check, 5), "2 issues / 5 of 28")
+        check.problems = 1
+        self.assertEqual(V.nav_count_text(check, 28), "1 issue / 28")
+        check.problems = 0
+        self.assertEqual(V.nav_count_text(check, 28), "0 issues / 28")
+        rel = R.View("L", "l", "in-db", "", ["a"], [{}] * 91)
+        rel.matched = 69
+        self.assertEqual(V.nav_count_text(rel, 91), "69 of 91 linked")
+        self.assertEqual(V.nav_count_text(rel, 40), "69 of 91 linked (40 shown)")
+        rel.matched = None
+        self.assertEqual(V.nav_count_text(rel, 91), "91")
+
+    def test_contents_shows_issues_for_checks(self):
+        app = self.app
+        app.g.views["NR4"].problems = 2
+        app.fill_nav()
+        self.assertEqual(app.nav.set("NR4", "rows"), f"2 issues / {len(app.g.views['NR4'].rows)}")
+
+    # ---- export
+    def test_export_writes_the_shown_rows_in_order_and_a_sidecar(self):
+        app = self.app
+        app.show("E_calls")
+        app.open_filter("StartUTC").sort(descending=True)
+        p = app.open_filter("Type")
+        p.toggle_item("v:Missed")
+        p.ok()
+        out = os.path.join(self.tmp.name, "calls.csv")
+        with mock.patch.object(V.filedialog, "asksaveasfilename", return_value=out):
+            app.export()
+        with open(out, encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f))
+        v = app.g.views["E_calls"]
+        self.assertEqual(rows[0], v.cols)
+        self.assertEqual([r[0] for r in rows[1:]], ["5", "3", "2", "1"])
+        self.assertFalse([r for r in rows if r and r[0].startswith("#")])     # no comment lines inside the CSV
+        with open(out + ".filter.txt", encoding="utf-8-sig") as f:
+            side = f.read()
+        self.assertIn("E_calls", side)
+        self.assertIn("calls.csv", side)
+        self.assertIn("4 of 5", side)
+        self.assertIn("StartUTC, Newest \u2192 Oldest", side)
+        self.assertIn("Type is one of", side)
+        self.assertNotIn(self.tmp.name, side)                                  # no local paths
+        self.assertIn(".filter.txt", app.status.cget("text"))
+
+    # ---- display and toolbar
+    def test_toolbar_labels_sit_left_of_their_own_controls(self):
+        d2 = pldemo.build(os.path.join(self.tmp.name, "device2"))
+        app = self.make([("one", self.src), ("two", d2)], withdraw=False)
+        app.geometry("1400x700")
+        app.update()
+        pairs = [(app.dev_lbl, app.dev_combo), (app.nearby_lbl, app.nearby_spin),
+                 (app.from_lbl, app.from_entry), (app.to_lbl, app.to_entry), (app.on_lbl, app.range_col_combo)]
+        controls = [c for _, c in pairs]
+        for lbl, ctl in pairs:
+            self.assertTrue(lbl.winfo_ismapped() and ctl.winfo_ismapped(), lbl.cget("text"))
+            self.assertLess(lbl.winfo_x(), ctl.winfo_x(), lbl.cget("text"))
+            if lbl.master is not ctl.master:
+                continue
+            gap = ctl.winfo_x() - (lbl.winfo_x() + lbl.winfo_width())
+            self.assertGreaterEqual(gap, 0, lbl.cget("text"))
+            for other in controls:
+                if other is ctl or other.master is not lbl.master:
+                    continue
+                d = min(abs(other.winfo_x() - (lbl.winfo_x() + lbl.winfo_width())),
+                        abs(lbl.winfo_x() - (other.winfo_x() + other.winfo_width())))
+                self.assertLess(gap, d, f"{lbl.cget('text')} is closer to another control")
+
+    def test_hover_hints(self):
+        app = self.app
+        hint = app.hints[app.nearby_spin]
+        for words in ("within", "minutes", "1-1440", "default 5"):
+            self.assertIn(words, hint)
+        hint = app.hints[app.cross_chk]
+        for words in ("last 10 digits", "package names", "time", "timeline", "People"):
+            self.assertIn(words, hint)
+
+    def test_invisible_characters_are_shown_but_raw_values_are_kept(self):
+        app = self.app
+        v = app.g.views["E_contacts"]
+        idx = next(i for i, r in enumerate(v.rows) if r["Name"] == "Frank Example")
+        v.rows[idx]["Name"] = "\u200e"
+        app.show("E_contacts", select_index=idx)
+        app.on_row()
+        self.assertEqual(app.table.set(str(idx), "Name"), "\u27e8U+200E\u27e9")
+        self.assertIn("\u27e8U+200E\u27e9", app.detail.get("1.0", "end"))
+        p = app.open_filter("Name")
+        self.assertIn("\u27e8U+200E\u27e9", p.list.item("v:\u200e", "text"))
+        p.cancel()
+        out = os.path.join(self.tmp.name, "inv.csv")
+        with mock.patch.object(V.filedialog, "asksaveasfilename", return_value=out):
+            app.export()
+        with open(out, encoding="utf-8-sig") as f:
+            names = [r[1] for r in csv.reader(f)]
+        self.assertIn("\u200e", names)
+
+    def test_clearer_view_names(self):
+        app = self.app
+        self.assertEqual(app.nav.item("N_notifications", "text"), "Notifications (live and recovered)")
+        self.assertEqual(V.NAV["R25"][2], "Check: sync counters (content_sequence)")
+        self.assertEqual(V.NAV["C_wpd"][2], "Portable devices (MTP: phones, cameras, drives)")
+        self.assertEqual(V.NAV["C_install"][2], "First driver install per device")
+
+    def test_typing_in_the_filter_box_is_debounced(self):
+        app = self.make([("demo", self.src)], withdraw=False)
+        app.show("E_calls")
+        calls = []
+        real = app.populate
+        app.populate = lambda *a, **k: (calls.append(1), real(*a, **k))
+        self.assertTrue(app.filter_entry.bind("<Key>"), "the box marks keystrokes")
+        for ch in "Alic":
+            # a real keystroke: the box's <Key> binding runs, then Tk's Entry binding inserts the character.
+            # Done here in that order (whether a generated key event inserts depends on window focus).
+            app._key_typed()
+            app.filter_entry.insert("end", ch)
+        app.update_idletasks()
+        app.update()
+        self.assertEqual(app.filter_var.get(), "Alic")
+        self.assertEqual(calls, [], "no refill while typing")
+        import time
+        time.sleep(0.4)
+        app.update()
+        self.assertEqual(calls, [1], "one refill after the pause")
+        self.assertEqual(len(app.table.get_children()), 2)
+
+    def test_keyboard_shortcuts(self):
+        app = self.make([("demo", self.src)], withdraw=False)
+        app.show("E_calls", select_index=0)
+        app.update()
+
+        def key(widget, seq):
+            widget.focus_force()
+            app.update()
+            widget.event_generate(seq)
+            app.update()
+        key(app.table, "<Control-f>")
+        self.assertIs(app.focus_get(), app.filter_entry)
+        with mock.patch.object(app, "export") as ex:
+            key(app.table, "<Control-e>")
+        self.assertEqual(ex.call_count, 1)
+        app.nav.focus_force()
+        app.update()
+        seen = []
+        for _ in range(4):
+            app.event_generate("<F6>")
+            app.update()
+            seen.append(app.focus_get())
+        self.assertEqual(seen, [app.table, app.links, app.detail, app.nav])
+        self.assertTrue(int(str(app.detail.cget("takefocus")) or 0))
+        app.focus_col["E_calls"] = "Type"
+        key(app.table, "<Alt-Down>")
+        self.assertIsNotNone(app.panel)
+        self.assertEqual(app.panel.col, "Type")
+        app.panel.toggle_item("v:Missed")
+        app.panel.ok()
+        self.assertEqual(len(app.table.get_children()), 4)
+        key(app.table, "<Control-Shift-F>")
+        self.assertEqual(len(app.table.get_children()), 5)
+
+
+class RebuildKeepsPackageCopyTest(unittest.TestCase):
+    def test_nearby_change_does_not_copy_the_localcache_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pldemo.build_package(tmp)
+            app = V.Viewer(V.P.find_device_dirs(root), localcache=V.D.find_localcache(root),
+                           connections=V.C.demo_source())
+            app.withdraw()
+            app.update()
+            try:
+                pc, work = app.pc, app.pc.work
+                phones = [r.get("HardwareID") for r in app.g.views["PC_phones"].rows]
+                with mock.patch.object(V.D, "PackageCopy", side_effect=AssertionError("copied again")):
+                    app.window_min.set("23")
+                    app.rebuild()
+                self.assertEqual(app.built_min, 23)
+                self.assertIs(app.pc, pc)
+                self.assertTrue(os.path.isdir(work))
+                self.assertEqual([r.get("HardwareID") for r in app.g.views["PC_phones"].rows], phones)
+                self.assertIn("C_usb", app.g.views)
+            finally:
+                app.on_close(warn=False)
 
 
 if __name__ == "__main__":
