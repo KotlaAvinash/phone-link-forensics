@@ -13,8 +13,27 @@ Recovers deleted rows from three kinds of dead space inside a .db file:
 
 It also carves WAL frames, which hold page images the main file may no longer
 have. In a frame that a later frame of the same page supersedes, the LIVE cells
-are decoded too: a row deleted since then survives there whole (status
-wal-superseded). Older copies of rows that are still live are not reported.
+are decoded too: a row deleted since then survives there whole, and so does
+the earlier version of a row edited since (a changed message body or status).
+
+STATUS of each record (column `status`; compared with the live table by rowid,
+then by decoded values):
+  also_live              dead space; the same values as the live row of that rowid
+  earlier version of live row
+                         dead space; the rowid is live but the values differ (an
+                         edited row's old cell - or the rowid was reused)
+  deleted_or_overwritten dead space; no live row has that rowid
+  wal-superseded         a live cell of a superseded page version; its rowid is
+                         no longer live (deleted since that version)
+  wal-superseded (earlier version of live row)
+                         a live cell of a superseded page version; the rowid is
+                         live, the values differ
+  unknown - live rows unreadable
+                         the live table could not be read, so liveness is unknown
+A live cell of a superseded version whose values equal the live row is NOT
+reported: every live row has such copies. A table column whose name is also a
+field of the carver (message.status, postaladdress.region) is written as
+col_<name>, so the carver's own field is never overwritten.
 
 WHY SCHEMA-GUIDED. A deleted cell is unlinked, so there is no pointer to it.
 Carving therefore means recognising a record by its own shape. A SQLite record
@@ -172,7 +191,14 @@ def page_regions(data, ps, pno, freelist, hdr_offset=None):
         fb = nxt
 
 
-WAL_SUPERSEDED = "wal-superseded"           # status: a row from an older WAL frame of a page, no longer live
+# Statuses (see the module docstring)
+ALSO_LIVE = "also_live"                       # dead space: the same values as the live row of that rowid
+DELETED = "deleted_or_overwritten"            # dead space: no live row has that rowid
+EARLIER_VERSION = "earlier version of live row"   # dead space: the rowid is live, its values differ
+WAL_SUPERSEDED = "wal-superseded"             # a cell of a superseded page version; its rowid is no longer live
+WAL_EARLIER_VERSION = "wal-superseded (earlier version of live row)"   # ... its rowid is live, its values differ
+# _version of a record decoded from a page version's live cells -> (status if rowid not live, if live but different)
+VERSION_STATUS = {"superseded": (WAL_SUPERSEDED, WAL_EARLIER_VERSION)}
 SUPERSEDED_REGION = "wal-superseded-cell"   # region: a live cell of a WAL frame that a later frame supersedes
 
 
@@ -289,6 +315,21 @@ def table_shapes(db_path, include_plumbing=False, errors=None):
     return shapes
 
 
+# Fields the carver itself writes into a record. A table column with one of these names is written as col_<name>.
+CARVER_FIELDS = {"table", "type_fit", "candidates", "source_file", "page", "region", "offset", "rowid", "cols",
+                 "overflow_lost", "status", "wal_frame", "wal_frame_state", "rowid_live", "json_package", "json_key",
+                 "json_post_time_utc", "time_basis", "confidence", "live_check", "scope"}
+
+
+def cut_at(types, q, lim):
+    """Index of the first value that does not fit whole in the local payload (it is cut off or missing)."""
+    for n, t in enumerate(types):
+        q += serial_len(t)
+        if q > lim:
+            return n
+    return None
+
+
 def carve_region(buf, start, length, shapes, ps, src, pno, kind, min_text=1, usable=None):
     """Scan one dead-space region for records whose self-description is consistent."""
     out = []
@@ -362,10 +403,13 @@ def carve_region(buf, start, length, shapes, ps, src, pno, kind, min_text=1, usa
         rec = {"table": tname, "type_fit": round(fit, 2),
                "candidates": "|".join("%s:%.2f" % (n, f) for f, n, _ in scored[:3]),
                "source_file": src, "page": pno, "region": kind,
-               "offset": i, "rowid": rowid, "cols": len(types)}
+               "offset": i, "rowid": rowid, "cols": len(types),
+               "_vals": vals, "_cut": cut_at(types, o2 + hsz, lim) if lost else None}
         if lost:
             rec["overflow_lost"] = "yes"      # the value continues on overflow pages that are not read here
         for cn, v in zip(cols, vals):
+            if cn in CARVER_FIELDS:
+                cn = "col_" + cn              # a column named like a carver field (message.status) keeps its value
             if isinstance(v, bytes):
                 rec[cn] = "<blob %d bytes>" % len(v)
             elif isinstance(v, str):
@@ -390,6 +434,49 @@ def live_rowids(db_path, table, errors=None):
     finally:
         if c is not None:
             c.close()
+
+
+def live_values(db_path, table, rowids, errors=None):
+    """{rowid: tuple of column values} of those live rows, or None when they could not be read."""
+    c = None
+    out = {}
+    try:
+        c = sqlite3.connect(_ro(db_path), uri=True)
+        want = sorted(r for r in rowids if isinstance(r, int))
+        for i in range(0, len(want), 500):
+            part = want[i:i + 500]
+            sql = 'SELECT rowid, * FROM "%s" WHERE rowid IN (%s)' % (table.replace('"', '""'), ",".join("?" * len(part)))
+            for row in c.execute(sql, part):
+                out[row[0]] = tuple(row[1:])
+        return out
+    except Exception as e:
+        if errors is not None:
+            errors.append("live values of %r: %s: %s" % (table, type(e).__name__, e))
+        return None
+    finally:
+        if c is not None:
+            c.close()
+
+
+def same_as_live(rec, live):
+    """Do a carved record's decoded values equal the live row? An INTEGER PRIMARY KEY column is stored as NULL in
+    the record (the rowid holds it); a value cut at the overflow boundary only has to be the start of the live one,
+    and the values after it, which did not survive, are not compared."""
+    vals, cut = rec.get("_vals"), rec.get("_cut")
+    if live is None or vals is None or len(vals) != len(live):
+        return False
+    for n, (v, lv) in enumerate(zip(vals, live)):
+        if cut is not None and n > cut:
+            break
+        if cut is not None and n == cut:
+            if v is None or (isinstance(v, type(lv)) and isinstance(v, (str, bytes)) and lv.startswith(v)):
+                continue
+            return False
+        if v is None and lv == rec.get("rowid"):
+            continue
+        if isinstance(v, (str, bytes)) != isinstance(lv, (str, bytes)) or v != lv:
+            return False
+    return True
 
 
 # ------------------------------------------------------------------ notification json (record header lost)
@@ -536,6 +623,53 @@ def carve_notification_json(db_path, data, ps, fl, include_wal, carved, errors):
     return out
 
 
+NOT_IN_KEY = ("page", "offset", "region", "source_file", "wal_frame", "wal_frame_state")
+
+
+def classify(db_path, recs, errors):
+    """De-duplicate carved records and give each its status against the live table (see the module docstring).
+
+    A record decoded from a live cell of a page version that is not the current one (r["_version"]) is dropped when
+    its values equal the live row of its rowid - every live row has such copies - and kept otherwise."""
+    seen, uniq = set(), []
+    for r in recs:
+        key = (r["table"], r["rowid"], tuple(sorted((k, str(v)) for k, v in r.items()
+                                                    if k not in NOT_IN_KEY and not k.startswith("_"))))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(r)
+    rowids = {}
+    for r in uniq:
+        if r["table"] not in rowids:
+            rowids[r["table"]] = live_rowids(db_path, r["table"], errors)
+    values = {}
+    for t, ids in rowids.items():
+        if ids is not None:
+            need = {r["rowid"] for r in uniq if r["table"] == t and r["rowid"] in ids}
+            values[t] = live_values(db_path, t, need, errors) if need else {}
+    out = []
+    for r in uniq:
+        ids, version = rowids[r["table"]], r.get("_version")
+        if ids is None:
+            r["status"] = UNKNOWN_LIVE
+        elif r["rowid"] in ids:
+            vals = values.get(r["table"])
+            # live values unreadable (the error is recorded): treat as the same row, as before values were compared
+            same = vals is None or same_as_live(r, vals.get(r["rowid"]))
+            if same and version:
+                continue          # a copy of the live row as it is now, in an older page version
+            if same:
+                r["status"] = ALSO_LIVE
+            else:
+                r["status"] = VERSION_STATUS[version][1] if version else EARLIER_VERSION
+        else:
+            r["status"] = VERSION_STATUS[version][0] if version else DELETED
+        for k in [k for k in r if k.startswith("_")]:
+            del r[k]
+        out.append(r)
+    return out
+
+
 def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json_pass=True):
     """Carve one database. Returns (records, stats).
 
@@ -579,42 +713,26 @@ def carve_db(db_path, include_wal=True, min_text=1, include_plumbing=False, json
                 # An older version of the page: its LIVE cells are rows as they were then, and a row since deleted
                 # survives here whole. Each cell is decoded where its pointer says it starts.
                 for off in leaf_cells(page, hdr_off):
-                    recs += carve_region(page, off, 1, shapes, ps, os.path.basename(wp), pno,
-                                         SUPERSEDED_REGION, min_text, usable)
+                    for r in carve_region(page, off, 1, shapes, ps, os.path.basename(wp), pno,
+                                          SUPERSEDED_REGION, min_text, usable):
+                        r["_version"] = "superseded"
+                        recs.append(r)
 
     # Plumbing tables are matched (so their records are not mislabelled as some
     # other table of the same width) but dropped here unless explicitly wanted.
     if not include_plumbing:
         recs = [r for r in recs if r["table"] not in PLUMBING]
 
-    # de-duplicate, and mark anything whose rowid is still live
-    seen, uniq = set(), []
-    live_cache = {}
-    for r in recs:
-        key = (r["table"], r["rowid"], tuple(sorted((k, str(v)) for k, v in r.items()
-                                                    if k not in ("page", "offset", "region", "source_file"))))
-        if key in seen:
-            continue
-        seen.add(key)
-        t = r["table"]
-        if t not in live_cache:
-            live_cache[t] = live_rowids(db_path, t, stats["errors"])
-        if live_cache[t] is None:
-            r["status"] = UNKNOWN_LIVE
-        elif r["rowid"] in live_cache[t]:
-            if r["region"] == SUPERSEDED_REGION:
-                continue          # an older frame's copy of a row that is still live: every live row has one
-            r["status"] = "also_live"
-        else:
-            r["status"] = WAL_SUPERSEDED if r["region"] == SUPERSEDED_REGION else "deleted_or_overwritten"
-        uniq.append(r)
+    uniq = classify(db_path, recs, stats["errors"])
     stats["json_carved"] = 0
     if json_pass and has_notification_json(shapes):
         jr = carve_notification_json(db_path, data, ps, fl, include_wal, uniq, stats["errors"])
         stats["json_carved"] = len(jr)
         uniq += jr
     stats["records"] = len(uniq)
-    stats["deleted_only"] = sum(1 for r in uniq if r["status"] != "also_live")
+    # rows that are not live in any form: copies of live rows and earlier versions of live rows are left out
+    stats["deleted_only"] = sum(1 for r in uniq if r["status"] not in (ALSO_LIVE, EARLIER_VERSION, WAL_EARLIER_VERSION))
+    stats["earlier_versions"] = sum(1 for r in uniq if r["status"] in (EARLIER_VERSION, WAL_EARLIER_VERSION))
     return (uniq, stats)
 
 

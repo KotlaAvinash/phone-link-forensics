@@ -742,6 +742,97 @@ class WalSuperseded(unittest.TestCase):
             self.assertEqual(plcarve.WAL_SUPERSEDED, "wal-superseded")
 
 
+MSG_DDL = "CREATE TABLE message (message_id INTEGER PRIMARY KEY, thread_id INTEGER, body TEXT, status INTEGER)"
+
+
+def copy_db_set(src, dst):
+    """Copy a .db with its -wal and -shm (while the writer is still open, so the WAL is not checkpointed)."""
+    for suf in ("", "-wal", "-shm"):
+        if os.path.isfile(src + suf):
+            shutil.copyfile(src + suf, dst + suf)
+
+
+def wal_writer(path):
+    w = sqlite3.connect(path, isolation_level=None)
+    w.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds default to secure_delete ON
+    w.execute("PRAGMA journal_mode=WAL")
+    w.execute("PRAGMA wal_autocheckpoint=0")
+    return w
+
+
+class EarlierVersions(unittest.TestCase):
+    """An older copy of a row that is still live is reported when its values differ, dropped when identical."""
+
+    def test_older_wal_frame_keeps_an_edited_rows_earlier_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = os.path.join(tmp, "src.db"), os.path.join(tmp, "phone.db")
+            w = wal_writer(src)
+            try:
+                w.execute(MSG_DDL)
+                w.execute("INSERT INTO message VALUES (1, 5, 'ORIGINAL BODY: meet at the old place', 1)")
+                w.execute("INSERT INTO message VALUES (2, 5, 'unchanged row', 1)")
+                w.execute("UPDATE message SET body = 'EDITED BODY: meet at the new place', status = 2"
+                          " WHERE message_id = 1")       # same rowid, a later frame of the same page
+                copy_db_set(src, dst)
+            finally:
+                w.close()
+            recs, st = plcarve.carve_db(dst)
+            msg = [r for r in recs if r["table"] == "message"]
+            old = [r for r in msg if "ORIGINAL BODY" in str(r.get("body"))]
+            self.assertEqual(len(old), 1, msg)
+            self.assertEqual(old[0]["rowid"], 1)
+            self.assertEqual(old[0]["status"], plcarve.WAL_EARLIER_VERSION)
+            self.assertEqual(plcarve.WAL_EARLIER_VERSION, "wal-superseded (earlier version of live row)")
+            self.assertEqual(old[0]["col_status"], 1)          # the row's own status column, before the edit
+            self.assertEqual(old[0]["region"], plcarve.SUPERSEDED_REGION)
+            self.assertEqual(old[0]["source_file"], "phone.db-wal")
+            self.assertEqual(len(msg), 1, "identical copies of live rows (row 2, and row 1 as it is now) are dropped")
+            self.assertEqual((st["deleted_only"], st["earlier_versions"]), (0, 1))
+
+    def test_carver_fields_are_not_overwritten_by_same_named_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "contacts.db")
+            c = sqlite3.connect(path)
+            c.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds default to secure_delete ON
+            c.execute("CREATE TABLE postaladdress (id INTEGER PRIMARY KEY, street TEXT, region TEXT, status TEXT)")
+            c.executemany("INSERT INTO postaladdress VALUES (?, ?, ?, ?)",
+                          [(i, "street %d" % i + "z" * 40, "Example Region", "home") for i in range(1, 4)])
+            c.commit()
+            c.execute("DELETE FROM postaladdress WHERE id = 3")      # the lowest cell: its bytes stay in page slack
+            c.commit()
+            c.close()
+            recs, _ = plcarve.carve_db(path)
+            self.assertTrue(recs)
+            for r in recs:
+                self.assertIn(r["region"], ("freeblock", "page-slack", "free-page"))
+                self.assertIn(r["status"], ("deleted_or_overwritten", "also_live"))
+                self.assertEqual((r["col_region"], r["col_status"]), ("Example Region", "home"))
+
+    def test_freeblock_copy_of_a_live_row_with_other_values_is_an_earlier_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "phone.db")
+            c = sqlite3.connect(path)
+            c.execute("PRAGMA secure_delete = OFF")  # keep deleted bytes: some SQLite builds default to secure_delete ON
+            c.execute(MSG_DDL)
+            c.execute("INSERT INTO message VALUES (1, 5, 'ORIGINAL BODY: meet at the old place', 1)")
+            c.execute("INSERT INTO message VALUES (2, 5, 'second row that is deleted xxxxxxxxxxxxxxxx', 1)")
+            c.execute("INSERT INTO message VALUES (3, 5, 'third row stays', 1)")
+            c.commit()
+            c.execute("DELETE FROM message WHERE message_id = 2")
+            # a longer body cannot reuse the freed space: the old cell stays behind in a freeblock
+            c.execute("UPDATE message SET body = ?, status = 2 WHERE message_id = 1", ("EDITED BODY: " + "y" * 300,))
+            c.commit()
+            c.close()
+            self.assertIn(b"ORIGINAL BODY", read_bytes(path))
+            recs, _ = plcarve.carve_db(path)
+            old = [r for r in recs if "ORIGINAL BODY" in str(r.get("body"))]
+            self.assertEqual(len(old), 1, recs)
+            self.assertEqual(old[0]["region"], "freeblock")
+            self.assertEqual(old[0]["status"], plcarve.EARLIER_VERSION)
+            self.assertEqual(old[0]["col_status"], 1)
+            self.assertEqual(plcarve.EARLIER_VERSION, "earlier version of live row")
+
+
 class FailedStaging(unittest.TestCase):
     def test_work_folder_removed_when_stage_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

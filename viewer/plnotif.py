@@ -184,6 +184,11 @@ def build(ev, g, View, ts_seconds, iso):
             where += f" - {plcarve.JSON_STATUS}: {c.get('confidence', '')}"
             if c.get("live_check"):
                 where += f" - {c['live_check']}"
+        elif c.get("status") not in (plcarve.DELETED, plcarve.UNKNOWN_LIVE, None):
+            # an earlier version of a live row, a superseded / uncommitted / stale WAL version: say which
+            where += f" - {c['status']}"
+            if c.get("wal_frame_state"):
+                where += f" (WAL frame {c.get('wal_frame')}: {c['wal_frame_state']})"
         if c["table"] == "notifications" and c.get("status") != "also_live":
             raw.append(("deleted", c.get("rowid"), c, where))
         elif c["table"] == "notification_toastmappings" and c.get("status") != "also_live":
