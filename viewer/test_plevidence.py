@@ -1359,6 +1359,52 @@ class MetadataScope(unittest.TestCase):
                          {"FullTrust/phone_apps.db", "DeviceMetadataStorage.json"})
 
 
+class MetadataLocation(unittest.TestCase):
+    """DeviceMetadataStorage.json is used only at the LocalCache level of a Phone Link layout holding the device."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write_meta(self, folder, ident="unrelated-id"):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "DeviceMetadataStorage.json"), "w", encoding="utf-8") as fh:
+            json.dump({"DeviceMetadatas": {"HW-X": [{"Metadata": {"Id": ident, "Metadata": {
+                "Manufacture": "UnrelatedMakerZ"}}}]}}, fh)
+
+    def test_plain_folder_does_not_pick_up_a_json_above_it(self):
+        triage = os.path.join(self.tmp, "case", "exports", "triage")
+        make_device(triage)
+        self.write_meta(os.path.join(self.tmp, "case", "exports"))
+        self.write_meta(os.path.join(self.tmp, "case"))
+        self.assertIsNone(P.find_metadata(triage))
+        path, note = P.locate_metadata(triage)
+        self.assertIsNone(path)
+        self.assertIn("not used", note)
+        out = os.path.join(self.tmp, "out")
+        run_main(["--input", triage, "--out", out])
+        acq = read_acq(out, "triage")
+        self.assertNotIn("UnrelatedMakerZ", json.dumps(acq))
+        self.assertFalse([r for r in acq["package_files"] if r["file"] == "DeviceMetadataStorage.json"])
+        self.assertIn("not used", acq["device_metadata"]["note"])
+
+    def test_every_package_input_shape_finds_it(self):
+        pkg = make_package(os.path.join(self.tmp, "in"))
+        lc = os.path.join(pkg, "LocalCache")
+        want = os.path.join(lc, "DeviceMetadataStorage.json")
+        dev = os.path.join(lc, "Indexed", GUID_A)
+        for inp in (pkg, lc, os.path.join(lc, "Indexed"), os.path.join(dev, "System", "Database")):
+            self.assertEqual(P.find_metadata(inp), want, inp)
+
+    def test_json_beside_an_indexed_folder_that_lacks_the_device_is_not_used(self):
+        lc = os.path.join(self.tmp, "x", "LocalCache")
+        os.makedirs(os.path.join(lc, "Indexed", GUID_B))
+        self.write_meta(lc)
+        dev = os.path.join(lc, "elsewhere")
+        make_device(dev)
+        self.assertIsNone(P.find_metadata(dev))
+
+
 class Recoverability(unittest.TestCase):
     """secure_delete is a setting of the analysing connection, not of the file. Judge by the file's bytes."""
 

@@ -193,14 +193,51 @@ def owns_ft_row(device_id, label):
     return is_guid(label) and norm_guid(device_id) == norm_guid(label)
 
 
-def find_metadata(root):
+def _inside(path, folder):
+    """Is path a folder strictly beneath folder? (case-insensitive, as on Windows)"""
+    a, b = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+    try:
+        return a != b and os.path.commonpath([a, b]) == b
+    except ValueError:                       # different drives
+        return False
+
+
+def locate_metadata(root, device_dirs=None):
+    """
+    (path, note) of the package's DeviceMetadataStorage.json. It is accepted ONLY at the LocalCache level of a
+    recognised Phone Link layout: ...\\LocalCache\\DeviceMetadataStorage.json with an Indexed folder beside it that
+    contains every device folder being parsed. Looked for at --input, --input\\LocalCache and the folders above
+    --input. A JSON found elsewhere (e.g. above a plain folder of .db files) is not used, and the note says where it
+    was; path is then None.
+    """
     root = os.path.abspath(root)
-    for base in (root, os.path.join(root, "LocalCache"),
-                 os.path.dirname(root), os.path.dirname(os.path.dirname(root))):
-        p = os.path.join(base, "DeviceMetadataStorage.json")
-        if os.path.isfile(p):
-            return p
-    return None
+    if device_dirs is None:
+        device_dirs = [d for _, d in find_device_dirs(root)]
+    cands, p = [root, os.path.join(root, "LocalCache")], root
+    for _ in range(6):
+        p = os.path.dirname(p)
+        cands.append(p)
+    rejected = []
+    for lc in dict.fromkeys(cands):
+        j = os.path.join(lc, META_FILE)
+        if not os.path.isfile(j):
+            continue
+        idx = os.path.join(lc, "Indexed")
+        if (os.path.basename(lc).lower() == "localcache" and os.path.isdir(idx) and device_dirs
+                and all(_inside(d, idx) for d in device_dirs)):
+            return j, ""
+        if j not in rejected:
+            rejected.append(j)
+    if not rejected:
+        return None, ""
+    return None, ("%s found at %s but not used: it is not at the LocalCache level of a Phone Link layout "
+                  "(...\\LocalCache\\%s beside an Indexed folder that holds the device folder), so it cannot be "
+                  "tied to this input." % (META_FILE, "; ".join(rejected), META_FILE))
+
+
+def find_metadata(root, device_dirs=None):
+    """Path of the package's DeviceMetadataStorage.json, or None (see locate_metadata)."""
+    return locate_metadata(root, device_dirs)[0]
 
 
 META_FILE = "DeviceMetadataStorage.json"
@@ -247,7 +284,7 @@ def read_metadata(meta_src, pkg_acq):
     return entries, ""
 
 
-def device_metadata(label, entries, error, meta_src):
+def device_metadata(label, entries, error, meta_src, locate_note=""):
     """
     Split the package-wide metadata into this device's entry/entries (Metadata.Id equal to
     the folder GUID) and everyone else's. Returns (this_device, package_other_entries).
@@ -256,6 +293,8 @@ def device_metadata(label, entries, error, meta_src):
     others = [e for e in entries if e not in mine]
     if not meta_src:
         note = "%s was not found; no device metadata available." % META_FILE
+        if locate_note:
+            note += " " + locate_note
     elif error:
         note = error
     elif mine:
@@ -1122,8 +1161,10 @@ def run(a, pkg_work):
         return 2
 
     ft_src = find_fulltrust(a.input)
-    meta_src = find_metadata(a.input)
+    meta_src, meta_note = locate_metadata(a.input, [d for _, d in devs])
     pkg_acq, pkg_warnings = [], []
+    if meta_note:
+        pkg_warnings.append(meta_note)
     meta_entries, meta_error = read_metadata(meta_src, pkg_acq)
     if meta_error:
         pkg_warnings.append(meta_error)
@@ -1302,7 +1343,7 @@ def run(a, pkg_work):
                                 seen_c.add(k); cols.append(k)
                     write_csv(os.path.join(cdir, "carved_%s.csv" % t), rows, cols)
 
-            dev_meta, other_meta = device_metadata(label, meta_entries, meta_error, meta_src)
+            dev_meta, other_meta = device_metadata(label, meta_entries, meta_error, meta_src, meta_note)
             with open(os.path.join(outdir, "acquisition.json"), "w", encoding="utf-8") as fh:
                 json.dump({"tool": TOOL, "version": VERSION,
                            "generated_utc": datetime.now(timezone.utc).isoformat(),
