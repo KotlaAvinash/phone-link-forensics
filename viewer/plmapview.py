@@ -212,6 +212,8 @@ def nav_place(v, window_min=None):
     return group, KIND_SUB.get(v.kind) if group != "overview" else None, name
 
 
+LINK_COLS = (("target", "Linked row", 3), ("where", "Found in", 2), ("how", "How it is linked", 3),
+             ("scope", "Scope", 1))   # the linked-rows pane in display order: (column, heading, share of the spare width)
 SCOPE_WORDS = {"in-table": "same table", "in-db": "other table, same database", "check": "check",
                "cross": "other database (inferred)"}
 WIDE = {"Title", "Text", "BigText", "BigTitle", "SubText", "TickerText", "Message", "Body", "Row", "Notification",
@@ -631,11 +633,11 @@ class Viewer(tk.Tk):
         role(tk.Label(lframe, text="LINKED ROWS  (double-click or Enter to jump)", font="PL.smallbold"),
              foreground="muted").pack(anchor="w", padx=6)
         self.links = ttk.Treeview(lframe, columns=("how", "target", "where", "scope"), show="headings", height=8)
-        for c, w, t in (("target", 280, "Linked row"), ("where", 300, "Found in"), ("how", 380, "How it is linked"),
-                        ("scope", 170, "Scope")):
+        for c, t, _ in LINK_COLS:
             self.links.heading(c, text=t)
-            self.links.column(c, width=self.px(w), minwidth=self.px(80), anchor="w", stretch=False)
-        self.links["displaycolumns"] = ("target", "where", "how", "scope")   # what it is and where, first
+            self.links.column(c, width=self.px(120), minwidth=self.px(60), anchor="w", stretch=c == "target")
+        self.links["displaycolumns"] = tuple(c for c, _, _ in LINK_COLS)   # what it is and where, first
+        self.links.bind("<Configure>", lambda e: self._fit_link_cols(e.width), add="+")
         links_x = ttk.Scrollbar(lframe, orient="horizontal", command=self.links.xview)
         self.links.configure(xscrollcommand=links_x.set)
         links_x.pack(side="bottom", fill="x", padx=6)
@@ -1519,9 +1521,26 @@ class Viewer(tk.Tk):
                                           where, SCOPE_WORDS.get(scope, scope)))
                 self.link_targets[iid] = target
                 n += 1
-        if n == 0:
-            self.links.insert("", "end", values=("No other row is linked to this one" +
-                                                 ("" if self.show_cross.get() else " inside its database"), "", "", ""))
+        if n == 0:      # in "target", the first column shown: the pane never looks empty
+            self.links.insert("", "end", values=("", "No other row is linked to this one" +
+                                                 ("" if self.show_cross.get() else " inside its database"), "", ""))
+
+    def _fit_link_cols(self, width=None):
+        """The linked-rows columns sized to the pane: each at least as wide as its heading, the rest shared out
+        (most to the linked row and how it is linked). Narrower than the headings: those widths, and it scrolls."""
+        width = int(width or self.links.winfo_width())
+        if width <= 1:
+            return
+        head = tkfont.nametofont("PL.bold", root=self)
+        mins = {c: head.measure(t) + self.px(18) for c, t, _ in LINK_COLS}
+        spare = width - self.px(4) - sum(mins.values())       # the Treeview's own border
+        weights = sum(w for _, _, w in LINK_COLS)
+        widths = {c: mins[c] + (max(0, spare) * w // weights) for c, _, w in LINK_COLS}
+        if spare > 0:      # rounding: the stretching column takes what is left
+            widths["target"] += width - self.px(4) - sum(widths.values())
+        for c, w in widths.items():
+            if int(self.links.column(c, "width")) != w:
+                self.links.column(c, width=w)
 
     def on_jump(self, _=None):
         sel = self.links.selection()

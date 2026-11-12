@@ -2178,5 +2178,60 @@ class ThemeViewerTest(unittest.TestCase):
         self.assertEqual(T.fit_text("abcdef", m, 5), "…")
 
 
+class ViewerReview3Test(unittest.TestCase):
+    """The third review of the window (synthetic demo): sizes, export, filters, keyboard, housekeeping."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = pldemo.build(os.path.join(self.tmp.name, "device"))
+        self.apps = []
+        self.app = self.make()
+
+    def make(self, devices=None, withdraw=True, **kw):
+        kw.setdefault("title_bar", lambda w, dark: True)
+        kw.setdefault("theme_reader", lambda: 1)
+        app = V.Viewer(devices or [("demo", self.src)], **kw)
+        if withdraw:
+            app.withdraw()
+        app.update()
+        self.apps.append(app)
+        return app
+
+    def tearDown(self):
+        for a in self.apps:
+            try:
+                a.on_close(warn=False)
+            except Exception:
+                pass
+        self.tmp.cleanup()
+
+    def sized(self, w, h, **kw):
+        app = self.make(withdraw=False, **kw)
+        app.geometry(f"{w}x{h}+0+0")
+        app.update()
+        return app
+
+    # ---- 1 the linked-rows pane
+    def test_linked_rows_pane_shows_its_message_and_fits_its_columns(self):
+        import tkinter.font as tkfont
+        for w, h in ((1366, 740), (1600, 950)):
+            app = self.sized(w, h)
+            app.show("E_calls", select_index=0)      # call 1 has no linked row inside its database
+            app.on_row()
+            app.update()
+            kids = app.links.get_children()
+            self.assertEqual(len(kids), 1)
+            vals = dict(zip(app.links["columns"], app.links.item(kids[0], "values")))
+            self.assertIn("No other row is linked", vals["target"])     # the first column shown
+            self.assertEqual(app.links["displaycolumns"][0], "target")
+            shown = app.links["displaycolumns"]
+            widths = [int(app.links.column(c, "width")) for c in shown]
+            self.assertLessEqual(sum(widths), app.links.winfo_width(), (w, widths))
+            bold = tkfont.nametofont("PL.bold", root=app)
+            for c, width in zip(shown, widths):
+                self.assertGreaterEqual(width, bold.measure(app.links.heading(c, "text")), (w, c))
+            app.on_close(warn=False)
+
+
 if __name__ == "__main__":
     unittest.main()
