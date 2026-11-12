@@ -545,9 +545,7 @@ class Viewer(tk.Tk):
         bar = role(tk.Frame(self, height=52), zone="panel")
         bar.pack(fill="x")
         # the controls are packed first so they always get their space; the title is what yields on a narrow window
-        self.theme_combo = ttk.Combobox(bar, state="readonly", width=21, values=list(THEME_LABELS.values()))
-        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._theme_picked())
-        self.theme_combo.pack(side="right", padx=(4, 10))
+        # (then the device box shrinks: _fit_toolbar)
         self.export_btn = role(tk.Button(bar, text="Export view (CSV)", command=self.export, relief="flat", padx=10),
                                background="accent", foreground="on_accent", activebackground="accent",
                                activeforeground="on_accent")
@@ -575,11 +573,16 @@ class Viewer(tk.Tk):
         self.app_title = role(tk.Label(bar, text=APP_TITLE, font="PL.title", anchor="w", width=1),
                               foreground="panel_title")
         self.app_title.pack(side="left", fill="x", expand=True, padx=14, pady=10)
-        self.app_title.bind("<Configure>", lambda e: self.app_title.config(text=T.fit_text(
-            APP_TITLE, tkfont.nametofont("PL.title", root=self).measure, max(1, e.width - 4))))
-        # the source line has a row of its own, so a long path can never push a control off the toolbar
+        self.app_title.bind("<Configure>", lambda e: self._fit_title(e.width))
+        bar.bind("<Configure>", lambda e: self._fit_toolbar(e.width), add="+")
+        self.toolbar = bar
+        # the source line has a row of its own, so a long path can never push a control off the toolbar; the theme
+        # picker sits at its right end (the row is mostly empty)
         srcrow = role(tk.Frame(self), zone="panel")
         srcrow.pack(fill="x")
+        self.theme_combo = ttk.Combobox(srcrow, state="readonly", width=21, values=list(THEME_LABELS.values()))
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._theme_picked())
+        self.theme_combo.pack(side="right", padx=(4, 10), pady=(0, 6))
         self.src_lbl = tk.Label(srcrow, text="", font="PL.body", anchor="w", width=1)
         self.src_lbl.pack(fill="x", padx=14, pady=(0, 6))
         self.src_lbl.bind("<Configure>", lambda e: self._fit_src())
@@ -873,6 +876,48 @@ class Viewer(tk.Tk):
                 out.append(p)
         return out
 
+    TITLE_MIN_CHARS = 8
+
+    def _fit_title(self, width):
+        """The in-app title shortened with "…" to its width - or empty when fewer than TITLE_MIN_CHARS characters
+        fit (the window title bar names the viewer anyway)."""
+        text = T.fit_text(APP_TITLE, tkfont.nametofont("PL.title", root=self).measure, max(1, width - 4))
+        if text != APP_TITLE and len(text.rstrip("…").rstrip()) < self.TITLE_MIN_CHARS:
+            text = ""
+        if self.app_title.cget("text") != text:
+            self.app_title.config(text=text)
+
+    @staticmethod
+    def _pack_width(w):
+        """A packed widget's requested width plus its horizontal padding."""
+        pad = w.pack_info().get("padx", 0)
+        pads = [int(float(p)) for p in str(pad).replace("(", " ").replace(")", " ").replace(",", " ").split()] \
+            if not isinstance(pad, (tuple, list)) else [int(p) for p in pad]
+        return w.winfo_reqwidth() + (sum(pads) if len(pads) > 1 else 2 * sum(pads))
+
+    DEV_CHARS, DEV_MIN_CHARS = 38, 10
+
+    def _fit_toolbar(self, width):
+        """The device box at full width (38 characters) while there is room for it and at least a few characters of
+        the title; narrower than that the title goes first, then the device box shrinks (its full name is in its
+        hover hint), so no other control is ever cut."""
+        if not self.dev_combo.winfo_manager() or width <= 1:
+            return
+        others = sum(self._pack_width(w) for w in self.toolbar.pack_slaves()
+                     if w not in (self.dev_combo, self.app_title))
+        char = max(1, tkfont.nametofont("PL.body", root=self).measure("0"))
+        cur = int(self.dev_combo.cget("width"))
+        overhead = self.dev_combo.winfo_reqwidth() - cur * char
+        room = width - others - self.px(4)
+        chars = max(self.DEV_MIN_CHARS, min(self.DEV_CHARS, (room - overhead) // char))
+        if chars != cur:
+            self.dev_combo.configure(width=chars)
+
+    def hint_text(self, widget):
+        """The hover hint of a widget, as it would be shown now."""
+        text = self.hints.get(widget)
+        return text() if callable(text) else text
+
     def _set_source(self, text):
         self.src_full = self._scrub(text)
         self._fit_src()
@@ -1132,22 +1177,32 @@ class Viewer(tk.Tk):
                                     background="accent", foreground="on_accent", activebackground="accent",
                                     activeforeground="on_accent")
         self.range_apply_btn.pack(side="left", padx=(8, 2), **pad)
-        self.preset_combo = ttk.Combobox(row, state="readonly", width=20, values=list(F.PRESETS))
+        # the end of the row (two groups) moves to a second row when the window is too narrow for all of it
+        # (_fit_rangebar), so every control - "Filter on" too - keeps its full width
+        quick = role(tk.Frame(self), zone="panel")
+        more = role(tk.Frame(self), zone="panel")
+        self.range_groups = [quick, more]
+        self.rangebar2 = role(tk.Frame(self), zone="panel")
+        self.preset_combo = ttk.Combobox(quick, state="readonly", width=20, values=list(F.PRESETS))
         self.preset_combo.set("Quick range…")
         self.preset_combo.bind("<<ComboboxSelected>>", lambda e: self.range_preset(self.preset_combo.get()))
         self.preset_combo.pack(side="left", padx=(6, 2), **pad)
-        self.range_clear_btn = tk.Button(row, text="Clear dates", command=self.clear_range, relief="flat", padx=8)
+        self.range_clear_btn = tk.Button(quick, text="Clear dates", command=self.clear_range, relief="flat", padx=8)
         self.range_clear_btn.pack(side="left", padx=(6, 2), **pad)
-        self.keep_chk = tk.Checkbutton(row, text="Keep undated rows", variable=self.range_keep,
+        self.keep_chk = tk.Checkbutton(more, text="Keep undated rows", variable=self.range_keep,
                                        command=self._keep_changed)
         self.keep_chk.pack(side="left", padx=(8, 2), **pad)
-        self.on_lbl = tk.Label(row, text="Filter on:", **lab)
+        self.on_lbl = tk.Label(more, text="Filter on:", **lab)
         self.on_lbl.pack(side="left", padx=(12, 2), **pad)
-        self.range_col_combo = ttk.Combobox(row, state="disabled", width=22)
+        self.range_col_combo = ttk.Combobox(more, state="disabled", width=22)
         self.range_col_combo.bind("<<ComboboxSelected>>", lambda e: self.on_range_col())
         self.range_col_combo.pack(side="left", **pad)
-        self.range_err = role(tk.Label(row, text="", font="PL.body", anchor="w"), foreground="warn")
+        self.range_err = role(tk.Label(more, text="", font="PL.body", anchor="w"), foreground="warn")
         self.range_err.pack(side="left", padx=(10, 2), **pad)
+        for g in self.range_groups:
+            g.pack(in_=row, side="left")
+        self._range_moved = 0
+        row.bind("<Configure>", lambda e: self._fit_rangebar(e.width), add="+")
         for w in (self.from_lbl, self.from_entry, self.to_lbl, self.to_entry, self.preset_combo, self.keep_chk,
                   self.on_lbl, self.range_col_combo):
             self._hint(w, HINTS["range"])
@@ -1155,6 +1210,8 @@ class Viewer(tk.Tk):
         self._hint(self.nearby_lbl, HINTS["nearby"])
         self._hint(self.cross_chk, HINTS["cross"])
         self._hint(self.theme_combo, HINTS["theme"])
+        self._hint(self.dev_combo, lambda: self.devices[self.dev_idx][0]
+                   if self.dev_idx is not None and self.dev_idx < len(self.devices) else "")
         self._hint(self.clear_btn, "Clear every column filter in every view, the case-wide dates and the text "
                                    "filter (Ctrl+Shift+F). Sorting stays.")
         # the filter line: what is filtered and sorted in this view, and the counts
@@ -1203,6 +1260,33 @@ class Viewer(tk.Tk):
     def time_col_width(self):
         """Pixels a time column needs for a whole 'YYYY-MM-DD HH:MM:SS' in the table font, plus the cell padding."""
         return tkfont.nametofont("PL.body", root=self).measure("0000-00-00 00:00:00") + self.px(16)
+
+    def _fit_rangebar(self, width):
+        """The dates row's last groups (quick range and Clear dates; Keep undated rows, Filter on and the date
+        error) stay on the row while they fit, else move - the last first - to a row of their own under it."""
+        if width <= 1:
+            return
+        row, row2, groups = self.rangebar, self.rangebar2, self.range_groups
+        own = sum(self._pack_width(w) for w in row.pack_slaves() if w not in groups)
+        widths = [g.winfo_reqwidth() for g in groups]
+        moved = len(groups)
+        for k in range(len(groups) + 1):          # k: how many groups, from the end, go to the second row
+            if own + sum(widths[:len(groups) - k]) <= width:
+                moved = k
+                break
+        if moved == self._range_moved:
+            return
+        self._range_moved = moved
+        for g in groups:
+            g.pack_forget()
+        row2.pack_forget()
+        for n, g in enumerate(groups):
+            if n < len(groups) - moved:
+                g.pack(in_=row, side="left")
+            else:
+                g.pack(in_=row2, side="left", padx=(self.px(6) if n == len(groups) - moved else 0, 0))
+        if moved:
+            row2.pack(fill="x", after=row)
 
     def _hint(self, widget, text):
         self.hints[widget] = text
@@ -2316,11 +2400,14 @@ class Hint:
 
     def _show(self):
         self.job = None
+        text = self.text() if callable(self.text) else self.text
+        if not text:
+            return
         try:
             tip = tk.Toplevel(self.widget)
             tip.wm_overrideredirect(True)
             tip.geometry(f"+{self.widget.winfo_rootx()}+{self.widget.winfo_rooty() + self.widget.winfo_height() + 4}")
-            tip_label(tip, self.text)
+            tip_label(tip, text)
             self.tip = tip
         except tk.TclError:
             pass

@@ -2048,7 +2048,7 @@ class ThemeViewerTest(unittest.TestCase):
         app = self.make(withdraw=False, theme_reader=lambda: 1)      # Windows apps set to light
         self.assertEqual(app.theme_mode, "light")
         self.assertEqual(app.theme_combo.get(), "Theme: Light")
-        self.assertIn(app.theme_combo, list(walk(app.export_btn.master)))       # on the toolbar
+        self.assertIn(app.theme_combo, list(walk(app.src_lbl.master)))   # at the right end of the source row
         app.theme_combo.set("Theme: Dark")
         app.theme_combo.event_generate("<<ComboboxSelected>>")
         app.update()
@@ -2640,6 +2640,36 @@ class ViewerReview3Test(unittest.TestCase):
         text = app.status.cget("text")
         self.assertIn("could not be written", text)
         self.assertIn("older", text)
+
+    # ---- 18 the title and the toolbars at laptop widths
+    def test_toolbars_fit_at_1600_1366_and_1280_px(self):
+        d2 = pldemo.build(os.path.join(self.tmp.name, "device2"))
+        long1 = "demo (synthetic) e3e3e3e3-e3e3-4e3e-ae3e-e3e3e3e3e3e3"
+        devices = [(long1, self.src), ("demo (synthetic) e2e2e2e2-e2e2-4e2e-ae2e-e2e2e2e2e2e2", d2)]
+        for w in (1600, 1366, 1280, 1000):
+            app = self.make(devices, withdraw=False, connections=V.C.demo_source())
+            app.geometry(f"{w}x740+0+0")
+            app.update()
+            app.show("C_usb")                                   # three time columns: the picker is enabled
+            app.update()
+            self.assertIs(app.theme_combo.master, app.src_lbl.master, "the theme picker is on the source row")
+            controls = [app.dev_combo, app.dev_lbl, app.nearby_lbl, app.nearby_spin, app.cross_chk, app.open_btn,
+                        app.export_btn, app.theme_combo, app.from_entry, app.to_entry, app.range_apply_btn,
+                        app.preset_combo, app.range_clear_btn, app.keep_chk, app.on_lbl, app.range_col_combo,
+                        app.clear_btn]
+            for c in controls:
+                x = c.winfo_rootx() - app.winfo_rootx()
+                self.assertTrue(c.winfo_ismapped(), (w, str(c)))
+                self.assertGreaterEqual(c.winfo_width(), c.winfo_reqwidth(), (w, str(c)))
+                self.assertLessEqual(x + c.winfo_width(), app.winfo_width(), (w, str(c)))
+            title = app.app_title.cget("text")
+            self.assertTrue(title == "" or len(title.rstrip("…")) >= 8, (w, title))
+            if w == 1600:
+                self.assertEqual(title, V.APP_TITLE)
+            if w == 1000:
+                self.assertLess(int(app.dev_combo.cget("width")), 38)       # the device box shrinks ...
+            self.assertEqual(app.hint_text(app.dev_combo), long1)               # ... its full name on hover
+            app.on_close(warn=False)
 
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
