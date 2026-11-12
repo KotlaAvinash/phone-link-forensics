@@ -237,6 +237,14 @@ class SmallFixes(unittest.TestCase):
         g = build_from(C.FakeSource({}, text))
         self.assertEqual(g.views["C_install"].rows[0]["FirstInstallLocal"], "1960-01-01 00:00:00")
 
+    def test_local_to_utc_wording_names_the_offset_of_that_date(self):
+        # astimezone() applies the offset in force on that date (DST included), not the PC's current one
+        text = ">>>  [Device Install (Hardware initiated) - USB\\VID_1&PID_2\\X]\n>>>  Section start 2030/01/01 00:00:00.000\n"
+        basis = build_from(C.FakeSource({}, text)).views["C_install"].basis
+        for said in (basis, C.local_to_utc.__doc__):
+            self.assertNotIn("current", said)
+            self.assertIn("in force on that date", said)
+
     def test_log_decoding(self):
         text = ">>>  [Device Install (Hardware initiated) - USB\\VID_1&PID_2\\X]"
         self.assertEqual(C.decode_log(text.encode("utf-16")), text)            # BOM written by .encode("utf-16")

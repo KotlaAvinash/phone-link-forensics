@@ -323,7 +323,8 @@ def parse_setupapi(text):
 
 
 def local_to_utc(s, logs_in_utc=False):
-    """setupapi.dev.log logs local time; convert with this PC's current UTC offset (labelled as such).
+    """setupapi.dev.log logs local time; convert with this PC's time-zone rules, i.e. the UTC
+    offset in force on that date (daylight saving included) as Windows knows it - not necessarily today's offset.
 
     Synthetic sources set logs_in_utc so the demo never reveals the running PC's time zone."""
     try:
@@ -641,8 +642,8 @@ def build(src, g, View):
     add("C_install", "First driver install (setupapi.dev.log)",
         SETUPAPI + " and the archived setupapi.dev.<date>.log copies beside it - the first time Windows installed a "
         "driver for each USB, USB storage, portable (SWD-WPD) or Bluetooth device id (earliest across all logs); "
-        "local time as logged, UTC with the current offset. Category tells devices that were connected from the PC's "
-        "own hardware (USB root hubs, and any PCI / HID / ROOT / ACPI id): every row is kept",
+        "local time as logged; UTC converted with this PC's time-zone rules (the offset in force on that date). "
+        "Category tells devices that were connected from the PC's own hardware (USB root hubs, and any PCI / HID / ROOT / ACPI id): every row is kept",
         ["FirstInstallLocal", "FirstInstallUTC", "Category", "DeviceID", "Section", "Log", "MatchedDevice"], rows)
 
     # events
