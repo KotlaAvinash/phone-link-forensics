@@ -2498,6 +2498,50 @@ class ViewerReview3Test(unittest.TestCase):
         key(p.ok_btn, "<Escape>")
         self.assertIsNone(app.panel)
 
+    # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
+    def test_a_copy_left_behind_by_a_failed_open_is_reported(self):
+        app = self.app
+        stuck = os.path.join(self.tmp.name, "plrelate-stuck000")
+        os.makedirs(stuck)
+
+        class Failing:
+            def __init__(self, path):
+                e = OSError("synthetic open failure")
+                e.left_behind = stuck
+                raise e
+        with mock.patch.object(V.R, "Evidence", Failing), mock.patch.object(V.messagebox, "showerror") as err:
+            self.assertFalse(app.load_device(0))
+        self.assertIn(stuck, app.leftovers)
+        msg = err.call_args[0][1]
+        self.assertIn("could not be removed", msg)
+        self.assertIn(stuck, msg)
+        self.assertIn("could not be removed", app.status.cget("text"))
+        with mock.patch.object(V.messagebox, "showwarning") as warn, mock.patch.object(V.Viewer, "destroy"):
+            app.on_close()
+        self.assertIn(stuck, warn.call_args[0][1])
+
+    def test_an_old_copy_that_cannot_be_removed_is_shown_at_once_and_on_close(self):
+        d2 = pldemo.build(os.path.join(self.tmp.name, "device2"))
+        app = self.make([("one", self.src), ("two", d2)])
+        old = app.ev.work
+        with mock.patch.object(V.R, "remove_copy", side_effect=lambda p: p):    # Windows keeps a file open
+            self.assertTrue(app.load_device(1))
+        self.assertEqual(app.leftovers, [old])
+        self.assertIn("could not be removed", app.status.cget("text"))
+        self.assertIn(old, app.status.cget("text"))
+        other = os.path.join(self.tmp.name, "plrelate-other000")      # one only plrelate knows about
+        os.makedirs(other)
+        V.R.LEFT_BEHIND.append(other)
+        try:
+            with mock.patch.object(V.messagebox, "showwarning") as warn, mock.patch.object(V.Viewer, "destroy"):
+                app.on_close()
+            text = warn.call_args[0][1]
+            self.assertIn(old, text)
+            self.assertIn(other, text)
+        finally:
+            V.R.LEFT_BEHIND.remove(other)
+            V.R.remove_copy(old)
+
 
 if __name__ == "__main__":
     unittest.main()

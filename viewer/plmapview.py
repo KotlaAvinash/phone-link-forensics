@@ -389,6 +389,7 @@ class Viewer(tk.Tk):
         self.conn_note = ""   # why the live USB/Bluetooth views are not shown, when they were dropped
         self.pc = None
         self.leftovers = []
+        self._status_main = ""
         self._last_min = min(NEARBY_MAX, max(NEARBY_MIN, int(window_min)))   # last valid Nearby value
         self.built_min = self._last_min      # the window the current relations were built with
         self.window_min = tk.StringVar(self, value=str(self._last_min))   # text: the box can hold anything while typing
@@ -719,7 +720,13 @@ class Viewer(tk.Tk):
             if self.g is not None and self.dev_idx is not None:
                 self.dev_combo.current(self.dev_idx)
             kept = "\n\nThe previous device is still shown." if self.g is not None else ""
+            left = getattr(e, "left_behind", None)       # plrelate could not remove the partial copy
+            if left:
+                self._remember(left)
+                kept += "\n\nIts partial copy could not be removed - remove it yourself:\n" + self._shown(left)
             messagebox.showerror("Could not load", self._scrub(f"{self._shown(path)}\n\n{self._why(e)}") + kept)
+            if left and self.g is not None:
+                self._status(self._status_main)          # the status line names it too
             return False
         self.config(cursor="")
         old = (self.ev, self.pc)      # the previous device copy AND the previous case's package copy
@@ -830,12 +837,26 @@ class Viewer(tk.Tk):
         return text
 
     def _status(self, text, warn=False):
-        """The status bar. A snapshot warning from the evidence copy is always kept on it."""
+        """The status bar. Copy folders that could not be removed and a snapshot warning from the evidence copy
+        are always kept on it."""
+        self._status_main = text
+        left = self._leftover_paths()
+        if left:
+            text += (f"  |  WARNING: {len(left)} temporary copy folder(s) could not be removed (a file is still in "
+                     f"use) - remove yourself: " + "; ".join(self._shown(p) for p in left))
         note = getattr(self.ev, "snapshot_note", "") if self.ev else ""
         if note:
             text += f"  |  WARNING: {note}"
         self.status.config(text=self._scrub(text))
-        self.themer.set(self.status, foreground="warn" if warn or note else "status")
+        self.themer.set(self.status, foreground="warn" if warn or note or left else "status")
+
+    def _leftover_paths(self):
+        """Copy folders this viewer, or plrelate (LEFT_BEHIND), could not remove and that are still there."""
+        out = []
+        for p in list(self.leftovers) + list(getattr(R, "LEFT_BEHIND", ())):
+            if p and p not in out and os.path.exists(p):
+                out.append(p)
+        return out
 
     def _set_source(self, text):
         self.src_full = self._scrub(text)
@@ -1715,10 +1736,11 @@ class Viewer(tk.Tk):
             self._remember(self.ev.close())
         if self.pc:
             self._remember(self.pc.close())
-        if self.leftovers and warn:
+        left = self._leftover_paths()
+        if left and warn:
             messagebox.showwarning("Copies not removed", "These temporary copies of the evidence could not be "
                                    "removed (a file is still in use). Remove them yourself:\n\n" +
-                                   "\n".join(self._shown(p) for p in self.leftovers))
+                                   "\n".join(self._shown(p) for p in left))
         self.destroy()
 
     def screenshot(self, path):
