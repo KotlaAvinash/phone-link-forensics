@@ -69,6 +69,14 @@ The **Contents** list on the left uses plain names grouped by topic, with each v
 
 ![SQLECmd map output](docs/images/06-sqlecmd-map-output.png)
 
+**Excel-style column filters**: every heading opens a panel to sort, set a condition, search the column's values and tick the ones to keep. Rows with no value are kept unless (Blanks) is unticked.
+
+![Column filter](docs/images/09-column-filter.png)
+
+**Dark mode**: Light / Dark / Follow Windows; every text colour meets WCAG AA contrast in both themes.
+
+![Dark mode](docs/images/10-dark-mode.png)
+
 ---
 
 ## Quick start

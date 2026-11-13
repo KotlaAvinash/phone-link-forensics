@@ -4,6 +4,8 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-13
+
 ### Added
 
 - **Excel-style column filters on every table.** Each heading opens a panel with type-aware sorting (A → Z, Smallest → Largest, Oldest → Newest; blanks last), conditions (contains / begins with / greater than / between / before / after …), a value search, a tick list with counts, **(Select All)** and **(Blanks)**, and OK / Cancel. Filters on several columns combine; rows with no value or date are kept unless (Blanks) is unticked.
@@ -36,11 +38,18 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - **Phones connected (summary)** has one row per physical device instead of one per interface.
 - Pairing status wording agrees with its row count; connection events say which field matched (a parent-device match is labelled as a child device's event); first driver installs are categorised as connected device or internal hardware; times without a zone stay in the pairing history; streamed apps with no pairing folder are flagged; live views say when they were read.
 - The toolbar labels sit beside their own controls ("Device: 6" looked like a device number), and changing Nearby no longer re-copies the whole package.
+- **WAL recovery keeps what an examiner needs:** an earlier version of a row that still exists (for example an edited message body) is kept when its values differ (`earlier version of live row` / `wal-superseded (earlier version of live row)`); the main file's copy of a page the WAL replaced is decoded; WAL frames are validated by salts, checksums and commit frames, and rows of uncommitted, old-generation or corrupt frames are reported as `wal-uncommitted`, `wal-stale` or `wal-invalid (checksum mismatch)`.
+- The notification JSON pass reports only objects in dead space; an intact record is decoded as a record, not labelled "record header lost".
+- **A phone is linked to its pairing folder by its stored `Metadata.Id`,** which on real data is the folder GUID; time matching is only a labelled fallback for entries whose Id is not a GUID, and never for a GUID that names no folder. The demo data now follows the real layout.
+- Every staged copy is re-hashed and compared with its source; a database and its `-wal`/`-shm` are copied as one set; `DeviceMetadataStorage.json` is only used from a Phone Link layout; device ids are compared with one normaliser (case and braces); SIM ids of -1 / blank mean "no SIM recorded", not an orphan; a copy folder that cannot be removed is retried and reported.
+- `--input` pointing at a device folder (`Indexed\{GUID}`) now finds its databases.
+- **The `.smap` reader follows YAML indentation:** a `Query: |` block's indent is taken from its first line (SQLECmd's own maps use 12 to 16 spaces; 31 upstream queries were read as empty), trailing `# comments` are not part of a value, and compact `- Name:` items are read. It matches PyYAML on all 97 maps, and CI now checks that against every upstream map.
+- **Viewer:** the export always matches its `.filter.txt` (a text search still waiting for its timer is applied first); reopening a filter and pressing OK keeps it; "(no zone)" times count as undated; the status bar and the filter panel's OK / Cancel stay visible on small screens; the linked-rows pane shows its message; the date range prefers a UTC column; Ctrl+Left / Ctrl+Right choose the keyboard's column; whole numbers keep full precision; quick ranges ignore implausible future dates; control borders and scrollbars meet 3:1 contrast; the title and toolbars fit at laptop widths.
 
 ### Changed
 
 - CI runs on Windows, pins SQLECmd commit `c67634af503bd53777689998f1d9e3c0b4e2fdff` for the cross-match test, uses `actions/checkout@v7` and `actions/setup-python@v7`, and is read-only.
-- Tests: 172 to 218.
+- Tests: 172 to 403 unit tests on Python 3.12 and 3.14, plus the answer-key and cross-match checks in `tests/run_tests.py`.
 - Documentation: the README says where working copies go and that running on a suspect PC is live response, separates what CI runs from manual tests, recommends copying the maps into SQLECmd's `Maps` folder, and lists tested versions and what the tool does not do. `ContinuityDB` states the date range of each size-based epoch reading. New `viewer/maps-upstream/README.md`, `SECURITY.md`, `CONTRIBUTING.md` and an issue template.
 - The GitHub owner name in links is `KotlaAvinash`.
 
@@ -76,7 +85,8 @@ First release.
 - **Phone connections (this PC):** USB, MTP, Bluetooth and Bluetooth LE devices, AutoPlay, first driver install and connection events from the live registry and logs, read-only.
 - README with synthetic screenshots and a table of where Windows stores phone connection traces; a plain-English Contents list.
 
-[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0...v2.0.1
 [2.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v1.0...v2.0
 [1.0]: https://github.com/KotlaAvinash/phone-link-forensics/releases/tag/v1.0

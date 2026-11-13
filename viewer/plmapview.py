@@ -54,7 +54,7 @@ KIND = {  # kind -> (heading, light colour (palette role "kind.<kind>"), plain m
     "check": ("Checks", LIGHT["kind.check"], "Rows whose partner is missing, or counts that disagree"),
     "cross": ("Across databases", LIGHT["kind.cross"],
               "Joins between DIFFERENT database files - inferences, hidden by default"),
-    "map": ("SQLECmd map output", LIGHT["kind.map"], "Exactly what the SQLECmd maps return"),
+    "map": ("SQLECmd map output", LIGHT["kind.map"], "The maps' queries, run by this viewer on the copy (SQLECmd itself can convert some values differently)"),
     "provenance": ("Provenance", LIGHT["kind.provenance"], "Where the copies came from and their hashes"),
 }
 APP_TITLE = "Phone Link Relations Viewer"
