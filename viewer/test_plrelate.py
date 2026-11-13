@@ -205,6 +205,61 @@ class Demo(unittest.TestCase):
 
 
 class SmapReader(unittest.TestCase):
+    def test_query_block_indent_is_taken_from_its_first_line(self):
+        """YAML sets a '|' block's indent by its first line; upstream maps use 12 to 16 spaces."""
+        for indent in (12, 13, 15, 16):
+            pad = " " * indent
+            text = ("Description: test\nAuthor: test\nVersion: 1.0\nId: x\nCSVPrefix: t\n"
+                    "FileName: t.db\nIdentifyQuery: SELECT 1;\nIdentifyValue: 1\nQueries:\n"
+                    "    -\n        Name: Q\n        Query: |\n"
+                    f"{pad}select\n{pad}   a,\n\n{pad}   b\n{pad}from t\n"
+                    "        BaseFileName: T\n")
+            fd, path = tempfile.mkstemp(suffix=".smap", prefix="pltest-smap-")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            try:
+                q = R.read_smap(path)["Queries"][0]
+            finally:
+                os.remove(path)
+            self.assertEqual(q["Query"], "select\n   a,\n\n   b\nfrom t", indent)
+            self.assertEqual(q["BaseFileName"], "T", indent)
+
+    def test_compact_list_items_and_quoted_values(self):
+        """'  - Name: X' items with keys at any indent, quoted one-line queries, nested BlobColumns."""
+        text = ("Description: test\nId: x\nIdentifyQuery: SELECT 1;\nIdentifyValue: 1\nQueries:\n"
+                "  - Name: First\n    Query: \"SELECT Id, Data FROM T ORDER BY Id\"\n"
+                "    BaseFileName: 'First Out'\n    BlobColumns:\n      - BlobColumn: Data\n"
+                "        BlobPrefix: d\n"
+                "  - Name: Second\n    Query: |\n      select 2\n    BaseFileName: Second\n")
+        fd, path = tempfile.mkstemp(suffix=".smap", prefix="pltest-smap-")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        try:
+            qs = R.read_smap(path)["Queries"]
+        finally:
+            os.remove(path)
+        self.assertEqual([q["Name"] for q in qs], ["First", "Second"])
+        self.assertEqual(qs[0]["Query"], "SELECT Id, Data FROM T ORDER BY Id")
+        self.assertEqual(qs[0]["BaseFileName"], "First Out")
+        self.assertEqual(qs[0]["BlobColumns"], [{"BlobColumn": "Data", "BlobPrefix": "d"}])
+        self.assertEqual(qs[1]["Query"], "select 2")
+
+    def test_trailing_comments_are_not_part_of_a_value(self):
+        """In YAML ' #' starts a comment after a plain value (an upstream map writes 'IdentifyValue: 5 # ...')."""
+        text = ("Description: test\nId: x\nIdentifyQuery: SELECT 2;\nIdentifyValue: 2 # both tables\n"
+                "Queries:\n    -\n        Name: Q # the query\n        Query: |\n                select 1\n"
+                "        BaseFileName: T   # file name\n")
+        fd, path = tempfile.mkstemp(suffix=".smap", prefix="pltest-smap-")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        try:
+            m = R.read_smap(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(m["IdentifyValue"], "2")
+        self.assertEqual(m["Queries"][0]["Name"], "Q")
+        self.assertEqual(m["Queries"][0]["BaseFileName"], "T")
+
     def test_reader_matches_yaml_on_every_map(self):
         try:
             import yaml

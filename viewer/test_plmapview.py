@@ -1615,6 +1615,27 @@ class AutoFilterTest(unittest.TestCase):
         calls = []
         real = app.populate
         app.populate = lambda *a, **k: (calls.append(1), real(*a, **k))
+        # The debounce timer is captured instead of waited for, so the test never races the wall clock
+        # (under load, 250 ms can pass between two keystrokes and a real timer would fire mid-typing).
+        pending, cancelled, ids = {}, 0, iter(range(1, 1000))
+        real_after, real_cancel = app.after, app.after_cancel
+
+        def fake_after(ms, func=None, *args):
+            if func == app._filter_due:
+                job = f"debounce#{next(ids)}"
+                pending[job] = (ms, func)
+                return job
+            return real_after(ms, func, *args)
+
+        def fake_cancel(job):
+            nonlocal cancelled
+            if job in pending:
+                del pending[job]
+                cancelled += 1
+                return None
+            return real_cancel(job)
+
+        app.after, app.after_cancel = fake_after, fake_cancel
         self.assertTrue(app.filter_entry.bind("<Key>"), "the box marks keystrokes")
         for ch in "Alic":
             # a real keystroke: the box's <Key> binding runs, then Tk's Entry binding inserts the character.
@@ -1625,9 +1646,11 @@ class AutoFilterTest(unittest.TestCase):
         app.update()
         self.assertEqual(app.filter_var.get(), "Alic")
         self.assertEqual(calls, [], "no refill while typing")
-        import time
-        time.sleep(0.4)
-        app.update()
+        self.assertEqual(len(pending), 1, "each keystroke replaces the previous timer")
+        self.assertEqual(cancelled, 3)
+        (delay, due), = pending.values()
+        self.assertEqual(delay, V.FILTER_DELAY_MS)
+        due()                                   # the pause is over: the timer fires once
         self.assertEqual(calls, [1], "one refill after the pause")
         self.assertEqual(len(app.table.get_children()), 2)
 

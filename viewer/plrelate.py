@@ -23,6 +23,7 @@ Usage as a library:
     graph.links(("call", 42))                    # every link of one row
 """
 import bisect
+import json
 import os
 import re
 import shutil
@@ -1069,44 +1070,176 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
 
 
 # ---------------------------------------------------------------- SQLECmd map output (stdlib .smap reader)
+def _plain(v):
+    """A YAML plain value without its trailing comment (' #' starts one); quoted values are left as they are."""
+    v = v.strip()
+    if v[:1] in ("'", '"'):
+        return v
+    cut = v.find(" #")
+    return v[:cut].rstrip() if cut >= 0 else v
+
+
+def _scalar(raw):
+    """A one-line YAML scalar: quoted ('...' with '' escapes, "..." with JSON-style escapes) or plain."""
+    raw = raw.strip()
+    if raw[:1] == "'":
+        i, out = 1, []
+        while i < len(raw):
+            if raw[i] == "'":
+                if raw[i + 1:i + 2] == "'":
+                    out.append("'")
+                    i += 2
+                    continue
+                return "".join(out)
+            out.append(raw[i])
+            i += 1
+        return raw
+    if raw[:1] == '"':
+        i = 1
+        while i < len(raw):
+            if raw[i] == "\\":
+                i += 2
+                continue
+            if raw[i] == '"':
+                try:
+                    return json.loads(raw[:i + 1])
+                except ValueError:
+                    return raw[1:i]
+            i += 1
+        return raw
+    return _plain(raw)
+
+
 def read_smap(path):
-    """Minimal reader for the SQLECmd .smap layout (no YAML library needed)."""
-    m, queries, cur, in_query, query_lines = {}, [], None, False, []
+    """Minimal reader for the SQLECmd .smap layout (no YAML library needed).
+
+    Follows indentation the way YAML does, for the shapes SQLECmd maps use: top-level 'Key: value'
+    lines (a plain value may continue on more-indented lines), a 'Queries:' list whose items start
+    with '-' alone or '- Key: value', item keys at any indent, a 'Query: |' block whose indent is set
+    by its first line (blank lines and deeper indents inside the SQL are kept), quoted one-line values,
+    trailing ' #' comments, and a nested 'BlobColumns:' list.
+    """
     with open(path, encoding="utf-8-sig") as f:
         lines = f.read().split("\n")
+    n = len(lines)
 
-    def flush_query():
-        nonlocal in_query, query_lines
-        if in_query and cur is not None:
-            cur["Query"] = "\n".join(l[16:] if l.startswith(" " * 16) else l.strip() for l in query_lines).strip()
-        in_query, query_lines = False, []
+    def ind(line):
+        return len(line) - len(line.lstrip(" "))
 
-    for line in lines:
-        if in_query:
-            if line.startswith(" " * 16) or not line.strip():
-                query_lines.append(line)
+    def skip(line):
+        s = line.strip()
+        return not s or s.startswith("#")
+
+    def block(i, key_indent):
+        """The '|' block that starts at line i, for a key at key_indent. Returns (text, next line)."""
+        out, bi = [], None
+        while i < n:
+            line = lines[i]
+            if not line.strip():
+                out.append("")
+                i += 1
                 continue
-            flush_query()
-        if line.startswith("#") or not line.strip():
+            if bi is None:
+                if ind(line) <= key_indent:
+                    break
+                bi = ind(line)
+            if ind(line) < bi:
+                break
+            out.append(line[bi:])
+            i += 1
+        return "\n".join(out).strip(), i
+
+    def continued(value, i, key_indent):
+        """A plain value continued on more-indented lines (YAML folds them with spaces)."""
+        parts = [value] if value else []
+        while i < n and not skip(lines[i]) and ind(lines[i]) > key_indent and not lines[i].strip().startswith("-"):
+            parts.append(_plain(lines[i]))
+            i += 1
+        return " ".join(parts), i
+
+    def blob_list(i, key_indent):
+        """The BlobColumns list that starts at line i (items deeper than key_indent)."""
+        cols, item_ind, cur = [], None, None
+        while i < n:
+            line = lines[i]
+            if skip(line):
+                i += 1
+                continue
+            if ind(line) <= key_indent:
+                break
+            s = line.strip()
+            if s.startswith("-") and (item_ind is None or ind(line) == item_ind):
+                item_ind = ind(line)
+                cur = {}
+                cols.append(cur)
+                s = s[1:].strip()
+                if not s:
+                    i += 1
+                    continue
+            if cur is not None and ":" in s:
+                k, v = s.split(":", 1)
+                cur[k.strip()] = _scalar(v)
+            i += 1
+        return cols, i
+
+    m, queries, i = {}, [], 0
+    while i < n:
+        line = lines[i]
+        if skip(line) or ind(line) > 0 or ":" not in line:
+            i += 1
             continue
-        if not line.startswith(" ") and ":" in line:
-            k, v = line.split(":", 1)
-            m[k.strip()] = v.strip()
-        elif line.strip() == "-" and line.startswith("    -"):
-            cur = {}
-            queries.append(cur)
-        elif line.startswith(" " * 8) and not line.startswith(" " * 9) and ":" in line and cur is not None:
-            k, v = line.strip().split(":", 1)
-            if k == "Query" and v.strip() == "|":
-                in_query = True
-            elif k != "BlobColumns":
-                cur[k] = v.strip()
-        elif line.strip().startswith("- BlobColumn:") and cur is not None:
-            cur.setdefault("BlobColumns", []).append({"BlobColumn": line.split(":", 1)[1].strip()})
-        elif line.startswith(" " * 14) and ":" in line and cur is not None and cur.get("BlobColumns"):
-            k, v = line.strip().split(":", 1)
-            cur["BlobColumns"][-1][k] = v.strip()
-    flush_query()
+        k, v = line.split(":", 1)
+        k = k.strip()
+        i += 1
+        if k != "Queries":
+            raw = v.strip()
+            if raw[:1] in ("'", '"'):
+                m[k] = _scalar(raw)
+            elif _plain(raw) in ("|", "|-", "|+"):
+                m[k], i = block(i, 0)
+            else:
+                m[k], i = continued(_plain(raw), i, 0)
+            continue
+        item_ind, key_ind, cur = None, None, None
+        while i < n:
+            line = lines[i]
+            if skip(line):
+                i += 1
+                continue
+            if ind(line) == 0:
+                break
+            s = line.strip()
+            if s.startswith("-") and (item_ind is None or ind(line) == item_ind):
+                item_ind = ind(line)
+                cur = {}
+                queries.append(cur)
+                rest = s[1:].lstrip()
+                if not rest:
+                    key_ind = None
+                    i += 1
+                    continue
+                key_ind = ind(line) + (len(s) - len(rest))
+                line = " " * key_ind + rest
+            if cur is None or ":" not in line:
+                i += 1
+                continue
+            if key_ind is None:
+                key_ind = ind(line)
+            if ind(line) != key_ind:
+                i += 1
+                continue
+            qk, qv = line.strip().split(":", 1)
+            qk = qk.strip()
+            i += 1
+            raw = qv.strip()
+            if qk == "BlobColumns":
+                cur["BlobColumns"], i = blob_list(i, key_ind)
+            elif raw[:1] in ("'", '"'):
+                cur[qk] = _scalar(raw)
+            elif _plain(raw) in ("|", "|-", "|+"):
+                cur[qk], i = block(i, key_ind)
+            else:
+                cur[qk], i = continued(_plain(raw), i, key_ind)
     m["Queries"] = queries
     return m
 

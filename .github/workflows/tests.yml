@@ -36,8 +36,10 @@ jobs:
           PL_UPSTREAM_MAPS: upstream/SQLMap/Maps
       - name: Synthetic answer-key tests
         run: python tests/run_tests.py --upstream-maps upstream/SQLMap/Maps
-      - name: Viewer relation tests
+      - name: Viewer relation tests (the .smap reader is checked against PyYAML on every upstream map too)
         run: python viewer/test_plrelate.py
+        env:
+          PL_UPSTREAM_MAPS: upstream/SQLMap/Maps
       - name: Evidence integrity and carving tests
         run: python viewer/test_plevidence.py
       - name: Linked-phones tests
