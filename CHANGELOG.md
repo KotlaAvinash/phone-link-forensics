@@ -4,6 +4,14 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-11-13
+
+Tests only; the tool is unchanged from 2.1.1.
+
+### Fixed
+
+- The toolbar test required the device box to shrink at 1000 px, which is true only at this machine's display scaling; at 100 % scaling (GitHub's Windows runner) everything fits at full width. A new test checks the rule itself on any screen: full width while the toolbar has room, narrower only when it has not, and full width again when room returns.
+
 ## [2.1.1] - 2026-11-13
 
 ### Fixed
@@ -92,7 +100,8 @@ First release.
 - **Phone connections (this PC):** USB, MTP, Bluetooth and Bluetooth LE devices, AutoPlay, first driver install and connection events from the live registry and logs, read-only.
 - README with synthetic screenshots and a table of where Windows stores phone connection traces; a plain-English Contents list.
 
-[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.2...HEAD
+[2.1.2]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0...v2.0.1

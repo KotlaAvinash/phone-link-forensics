@@ -2689,6 +2689,36 @@ class ViewerReview3Test(unittest.TestCase):
         self.assertIn("older", text)
 
     # ---- 18 the title and the toolbars at laptop widths
+    def test_device_box_shrinks_only_when_the_toolbar_needs_the_room(self):
+        """Full width (38 characters) while the toolbar has room; narrower only when it does not - whatever the
+        screen size and display scaling (a fixed pixel width would test this PC's DPI, not the rule)."""
+        d2 = pldemo.build(os.path.join(self.tmp.name, "device2"))
+        long1 = "demo (synthetic) e3e3e3e3-e3e3-4e3e-ae3e-e3e3e3e3e3e3"
+        devices = [(long1, self.src), ("demo (synthetic) e2e2e2e2-e2e2-4e2e-ae2e-e2e2e2e2e2e2", d2)]
+        app = self.make(devices, withdraw=False, connections=V.C.demo_source())
+        wide = min(1600, app.winfo_screenwidth() - 20)
+        app.geometry(f"{wide}x700+0+0")
+        app.update()
+        full = app.DEV_CHARS
+        if int(app.dev_combo.cget("width")) < full:
+            app.on_close(warn=False)
+            self.skipTest(f"screen {app.winfo_screenwidth()} px is too narrow to show the device box at full width")
+        need = sum(app._pack_width(x) for x in app.toolbar.pack_slaves() if x is not app.app_title)
+        self.assertLessEqual(need, app.winfo_width(), "at full width everything fits")
+        narrow = need - app.px(60)                       # a little less room than the full-width toolbar needs
+        app.geometry(f"{narrow}x700+0+0")
+        app.update()
+        self.assertLess(int(app.dev_combo.cget("width")), full, "the device box gives up the missing room")
+        self.assertGreaterEqual(int(app.dev_combo.cget("width")), app.DEV_MIN_CHARS)
+        for c in (app.dev_combo, app.nearby_spin, app.cross_chk, app.open_btn, app.export_btn):
+            x = c.winfo_rootx() - app.winfo_rootx()
+            self.assertLessEqual(x + c.winfo_width(), app.winfo_width(), str(c))
+        self.assertEqual(app.hint_text(app.dev_combo), long1)
+        app.geometry(f"{wide}x700+0+0")                  # room again: back to full width
+        app.update()
+        self.assertEqual(int(app.dev_combo.cget("width")), full)
+        app.on_close(warn=False)
+
     def test_toolbars_fit_at_1600_1366_and_1280_px(self):
         d2 = pldemo.build(os.path.join(self.tmp.name, "device2"))
         long1 = "demo (synthetic) e3e3e3e3-e3e3-4e3e-ae3e-e3e3e3e3e3e3"
@@ -2722,9 +2752,7 @@ class ViewerReview3Test(unittest.TestCase):
             for g in app.range_groups:                                          # a group moved to the second
                 holder = str(g.pack_info()["in"])                               # row is drawn ABOVE that row
                 self.assertGreater(stack.index(str(g)), stack.index(holder), (w, str(g)))
-            if w == 1000:
-                self.assertLess(int(app.dev_combo.cget("width")), 38)       # the device box shrinks ...
-            self.assertEqual(app.hint_text(app.dev_combo), long1)               # ... its full name on hover
+            self.assertEqual(app.hint_text(app.dev_combo), long1)               # its full name on hover
             app.on_close(warn=False)
         if skipped:                                                             # reported, never silent
             self.skipTest("widths larger than this screen were not tested: " + ", ".join(skipped))
