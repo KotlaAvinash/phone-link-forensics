@@ -2257,18 +2257,29 @@ class ViewerReview3Test(unittest.TestCase):
         app.update()
         return app
 
+    def need_size(self, app, w, h=None):
+        """Skip this sub-case (reported, never silent) when Windows clamped the window to a smaller screen,
+        as on CI runners whose virtual display is smaller than the size under test."""
+        got_w, got_h = app.winfo_width(), app.winfo_height()
+        if got_w < w - 2 or (h is not None and got_h < h - 2):
+            screen = f"{app.winfo_screenwidth()}x{app.winfo_screenheight()}"
+            app.on_close(warn=False)
+            self.skipTest(f"screen {screen} cannot hold a {w}x{h or got_h} window (got {got_w}x{got_h})")
+
     # ---- 1 the linked-rows pane
     def test_linked_rows_pane_shows_its_message_and_fits_its_columns(self):
         import tkinter.font as tkfont
-        for w, h in ((1366, 740), (1600, 950)):
+        for w, h in ((1000, 560), (1366, 740), (1600, 950)):
+          with self.subTest(size=f"{w}x{h}"):
             app = self.sized(w, h)
+            self.need_size(app, w, h)
             app.show("E_calls", select_index=0)      # call 1 has no linked row inside its database
             app.on_row()
             app.update()
             kids = app.links.get_children()
             self.assertEqual(len(kids), 1)
             vals = dict(zip(app.links["columns"], app.links.item(kids[0], "values")))
-            self.assertIn("No other row is linked", vals["target"])     # the first column shown
+            self.assertEqual(vals["target"], "No linked rows in its database")     # the first column shown
             self.assertEqual(app.links["displaycolumns"][0], "target")
             body = tkfont.nametofont("PL.body", root=app)
             self.assertGreaterEqual(int(app.links.column("target", "width")), body.measure(vals["target"]),
@@ -2682,10 +2693,15 @@ class ViewerReview3Test(unittest.TestCase):
         d2 = pldemo.build(os.path.join(self.tmp.name, "device2"))
         long1 = "demo (synthetic) e3e3e3e3-e3e3-4e3e-ae3e-e3e3e3e3e3e3"
         devices = [(long1, self.src), ("demo (synthetic) e2e2e2e2-e2e2-4e2e-ae2e-e2e2e2e2e2e2", d2)]
+        skipped = []
         for w in (1600, 1366, 1280, 1000):
             app = self.make(devices, withdraw=False, connections=V.C.demo_source())
             app.geometry(f"{w}x740+0+0")
             app.update()
+            if app.winfo_width() < w - 2:                       # Windows clamped it to a smaller screen
+                skipped.append(f"{w} px (screen {app.winfo_screenwidth()} px)")
+                app.on_close(warn=False)
+                continue
             app.show("C_usb")                                   # three time columns: the picker is enabled
             app.update()
             self.assertIs(app.theme_combo.master, app.src_lbl.master, "the theme picker is on the source row")
@@ -2710,6 +2726,8 @@ class ViewerReview3Test(unittest.TestCase):
                 self.assertLess(int(app.dev_combo.cget("width")), 38)       # the device box shrinks ...
             self.assertEqual(app.hint_text(app.dev_combo), long1)               # ... its full name on hover
             app.on_close(warn=False)
+        if skipped:                                                             # reported, never silent
+            self.skipTest("widths larger than this screen were not tested: " + ", ".join(skipped))
 
     # ---- copies that could not be removed (plrelate.remove_copy / Evidence.left_behind)
     def test_a_copy_left_behind_by_a_failed_open_is_reported(self):

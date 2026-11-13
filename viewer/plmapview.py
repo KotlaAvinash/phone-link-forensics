@@ -1774,8 +1774,8 @@ class Viewer(tk.Tk):
             self.links["displaycolumns"] = shown
             self._fit_link_cols()
         if n == 0:
-            self.links.insert("", "end", values=("", "No other row is linked to this one" +
-                                                 ("" if self.show_cross.get() else " inside its database"), "", ""))
+            self.links.insert("", "end", values=("", "No linked rows" +       # short, so a narrow pane shows all of it
+                                                 ("" if self.show_cross.get() else " in its database"), "", ""))
 
     def _fit_link_cols(self, width=None):
         """The linked-rows columns sized to the pane: each at least as wide as its heading, the rest shared out

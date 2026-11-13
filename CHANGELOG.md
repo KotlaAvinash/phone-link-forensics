@@ -4,6 +4,13 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-13
+
+### Fixed
+
+- The linked-rows message is shorter ("No linked rows in its database"), so a narrow pane shows all of it.
+- Two layout tests asked for windows wider than the CI runner's screen, which Windows clamps; a size the screen cannot hold is now reported as skipped, with the screen size, instead of failing.
+
 ## [2.1.0] - 2026-11-13
 
 ### Added
@@ -85,7 +92,8 @@ First release.
 - **Phone connections (this PC):** USB, MTP, Bluetooth and Bluetooth LE devices, AutoPlay, first driver install and connection events from the live registry and logs, read-only.
 - README with synthetic screenshots and a table of where Windows stores phone connection traces; a plain-English Contents list.
 
-[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0...v2.0.1
 [2.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v1.0...v2.0
