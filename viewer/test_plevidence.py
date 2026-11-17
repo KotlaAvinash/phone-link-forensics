@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -106,7 +107,7 @@ class SnapshotStability(unittest.TestCase):
                 self.assertEqual(v["copy_sha256"], P.sha256(os.path.join(ev.work, v["file"])))
             g = R.build(ev)
             view = g.views["P_copies"]
-            self.assertEqual(view.cols, ["file", "source_sha256", "copy_sha256", "copy_matches", "source_stable"])
+            self.assertEqual(view.cols, ["file", "source_sha256", "copy_sha256", "copy_matches", "source_stable", "readable"])
             self.assertTrue(all(r["copy_matches"].startswith("n/a") for r in view.rows))
             self.assertTrue(all(r["source_stable"] == P.UNSTABLE for r in view.rows))
         finally:
@@ -124,7 +125,7 @@ class SnapshotStability(unittest.TestCase):
                 self.assertTrue(v["source_sha256"])
             g = R.build(ev)
             view = g.views["P_copies"]
-            self.assertEqual(view.cols, ["file", "source_sha256", "copy_sha256", "copy_matches", "source_stable"])
+            self.assertEqual(view.cols, ["file", "source_sha256", "copy_sha256", "copy_matches", "source_stable", "readable"])
             self.assertTrue(all(r["copy_matches"] == "yes" and r["source_stable"] == "yes" for r in view.rows))
         finally:
             ev.close()
@@ -238,6 +239,140 @@ class ChangingShm(unittest.TestCase):
                 self.assertEqual(row["wal_sha256"], P.sha256(os.path.join(src, "phone.db-wal")))
             finally:
                 ev.close()
+
+
+class HostileAndDamagedInput(unittest.TestCase):
+    """Found by feeding the published tool bad input: none of this may hide good data or reach Excel as a formula."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="pltest-hostile-")
+        self.dev = pldemo.build(os.path.join(self.tmp, "dev"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_cli(self, *extra, src=None):
+        out = os.path.join(self.tmp, "out")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                code = P.main(["--input", src or self.dev, "--out", out, *extra])
+            except SystemExit as e:
+                code = e.code
+        return out, code, buf.getvalue()
+
+    def test_csv_cells_cannot_be_formulas(self):
+        """A contact name or number comes from the phone; '=cmd|...' must not reach a spreadsheet as a formula."""
+        c = sqlite3.connect(os.path.join(self.dev, "calling.db"))
+        c.execute("UPDATE call_history SET phone_number = ? WHERE call_id = (SELECT MIN(call_id) FROM call_history)",
+                  ("=cmd|' /C calc'!A0",))
+        c.commit()
+        c.close()
+        out, _, _ = self.run_cli()
+        path = [os.path.join(r, "calls.csv") for r, _, fs in os.walk(out) if "calls.csv" in fs][0]
+        with open(path, encoding="utf-8-sig", newline="") as fh:
+            cells = [x for row in csv.reader(fh) for x in row]
+        self.assertTrue(any(x.startswith("'=cmd|") for x in cells), "the cell is kept, as text")
+        self.assertFalse([x for x in cells if x[:1] in ("=", "@", "\t", "\r")], "no cell starts a formula")
+        risky = [x for x in cells if x[:1] in ("+", "-") and not re.fullmatch(r"-?[0-9]+(\.[0-9]+)?|\+[0-9]+", x)]
+        self.assertEqual(risky, [], "a leading + or - is left alone only on a plain number")
+        self.assertEqual(P.csv_safe("+15550100"), "+15550100")
+        self.assertEqual(P.csv_safe("-5"), "-5")
+        self.assertEqual(P.csv_safe("+1 555 0100"), "'+1 555 0100")
+        self.assertEqual(P.csv_safe("@SUM(1)"), "'@SUM(1)")
+
+    def test_out_that_is_a_file_is_a_clear_message(self):
+        blocker = os.path.join(self.tmp, "out")
+        open(blocker, "w").close()
+        _, code, text = self.run_cli()
+        self.assertEqual(code, 2)
+        self.assertIn("--out", text)
+        self.assertIn("not a folder", text)
+
+    def test_absent_databases_are_not_counted_as_failed_reads(self):
+        """A folder that simply holds fewer databases is normal; 'N reads FAILED' is kept for real failures."""
+        only = os.path.join(self.tmp, "only-calls")
+        os.makedirs(only)
+        for f in os.listdir(self.dev):
+            if f.startswith("calling.db"):
+                shutil.copy2(os.path.join(self.dev, f), only)
+        out, code, _ = self.run_cli(src=only)
+        self.assertEqual(code, 0)
+        acq = [os.path.join(r, "acquisition.json") for r, _, fs in os.walk(out) if "acquisition.json" in fs][0]
+        with open(acq, encoding="utf-8") as fh:
+            a = json.load(fh)
+        self.assertEqual(a["counts"]["failed reads"], 0, a["warnings"])
+        self.assertFalse([w for w in a["warnings"] if "FAILED" in w], a["warnings"])
+        note = [w for w in a["warnings"] if "not in this folder" in w]
+        self.assertEqual(len(note), 1, a["warnings"])
+        self.assertIn("phone.db", note[0])
+        self.assertNotIn("calling.db", note[0])
+
+    def test_a_real_failed_read_is_still_reported(self):
+        with open(os.path.join(self.dev, "notifications.db"), "wb") as fh:
+            fh.write(b"this is not a database " * 400)
+        for s in ("-wal", "-shm"):
+            if os.path.exists(os.path.join(self.dev, "notifications.db" + s)):
+                os.remove(os.path.join(self.dev, "notifications.db" + s))
+        out, _, _ = self.run_cli()
+        acq = [os.path.join(r, "acquisition.json") for r, _, fs in os.walk(out) if "acquisition.json" in fs][0]
+        with open(acq, encoding="utf-8") as fh:
+            a = json.load(fh)
+        self.assertGreater(a["counts"]["failed reads"], 0)
+        self.assertTrue([w for w in a["warnings"] if "FAILED" in w])
+
+    def test_one_damaged_database_does_not_hide_the_others(self):
+        """The viewer's engine: a corrupt notifications.db must not stop calls and contacts from loading."""
+        with open(os.path.join(self.dev, "notifications.db"), "wb") as fh:
+            fh.write(b"this is not a database " * 400)
+        for s in ("-wal", "-shm"):
+            if os.path.exists(os.path.join(self.dev, "notifications.db" + s)):
+                os.remove(os.path.join(self.dev, "notifications.db" + s))
+        ev = R.Evidence(self.dev)
+        try:
+            g = R.build(ev, 5)
+            self.assertEqual(len(g.views["E_calls"].rows), 5)
+            self.assertGreater(len(g.views["E_contacts"].rows), 0)
+            self.assertIn("notifications.db", ev.damaged)
+            self.assertIn("notifications.db", ev.snapshot_note)
+            self.assertIn("could not be read", ev.snapshot_note)
+            v = g.views["P_copies"]
+            row = [r for r in v.rows if r["file"] == "notifications.db"][0]
+            self.assertIn("not a database", row["readable"])
+            self.assertEqual([r for r in v.rows if r["file"] == "calling.db"][0]["readable"], "yes")
+            self.assertEqual(ev.table("notifications.db", "notifications", ["id"]), [])
+            self.assertIn("notifications.db unreadable", ev.missing_note([("notifications.db", "notifications")]))
+            self.assertIn("UNREADABLE", v.basis)
+        finally:
+            ev.close()
+
+    def test_checking_readability_does_not_change_the_copies(self):
+        """The copies' hashes are recorded before the check; the check must not rewrite a -shm or anything else."""
+        ev = R.Evidence(self.dev)
+        try:
+            for row in ev.acq:
+                if row.get("status") != "copied":
+                    continue
+                for suffix, key in (("", "sha256"), ("-wal", "wal_sha256"), ("-shm", "shm_sha256")):
+                    path = os.path.join(ev.work, row["file"] + suffix)
+                    if row.get(key) and os.path.isfile(path):
+                        self.assertEqual(P.sha256(path), row[key], row["file"] + suffix)
+        finally:
+            ev.close()
+
+    def test_a_folder_with_no_readable_database_is_still_refused(self):
+        """Nothing readable at all is an error (the viewer then keeps the case it was showing), not an empty case."""
+        for f in os.listdir(self.dev):
+            if f.endswith(".db"):
+                with open(os.path.join(self.dev, f), "wb") as fh:
+                    fh.write(b"this is not a database " * 400)
+            else:
+                os.remove(os.path.join(self.dev, f))
+        before = set(os.listdir(tempfile.gettempdir()))
+        with self.assertRaises(sqlite3.DatabaseError) as cm:
+            R.Evidence(self.dev)
+        self.assertIn("none of the", str(cm.exception))
+        self.assertEqual([x for x in set(os.listdir(tempfile.gettempdir())) - before if x.startswith("plrelate-")], [])
 
 
 class InputShapes(unittest.TestCase):

@@ -4,6 +4,24 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-17
+
+Found by validating the published 2.1.2 from a fresh clone and feeding it damaged and hostile input.
+
+### Added
+
+- **Relation matrix:** two views under *Overview and checks* - a table × table grid of link counts and a list of linked table pairs with stored / inferred counts, the relations behind them and an example. Counted from the same links the viewer shows; the totals equal the status bar's link count.
+- The README documents the command-line parser `plparse.py`.
+
+### Fixed
+
+- **Links to rows that do not exist are no longer made.** A participant (or a party) whose conversation was gone was still linked to it - 22 such links on real data, found by the matrix. They are orphans (already listed by the check), not links.
+- **One damaged database no longer makes the viewer refuse the whole device.** It is set aside and named (status bar, `readable` column in *Copies and hashes*); the others load. The check uses SQLite's immutable mode so it does not alter the copy. A folder with no readable database at all is still refused.
+- **`plparse.py` CSV cells can no longer run as spreadsheet formulas** (leading `=` `+` `-` `@`, tab or carriage return get a leading `'`, as in the viewer's export).
+- `plparse.py`: databases that are not in the folder are named once instead of being counted as failed reads; `--out` that is an existing file gives a clear message instead of a traceback.
+- Tests: 403 to 414 unit tests on Python 3.12 and 3.14 (damaged and hostile input, the relation matrix checked against an independent count).
+
+
 ## [2.1.2] - 2026-11-13
 
 Tests only; the tool is unchanged from 2.1.1.
@@ -100,7 +118,8 @@ First release.
 - **Phone connections (this PC):** USB, MTP, Bluetooth and Bluetooth LE devices, AutoPlay, first driver install and connection events from the live registry and logs, read-only.
 - README with synthetic screenshots and a table of where Windows stores phone connection traces; a plain-English Contents list.
 
-[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.2...HEAD
+[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.0.1...v2.1.0

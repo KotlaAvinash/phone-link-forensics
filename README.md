@@ -126,7 +126,7 @@ That folder holds `phone.db` (SMS, MMS, RCS), `calling.db` (calls), `contacts.db
 
 - **Left: Contents.** Plain-English names grouped by topic, each with its row count on the right:
   - **Notifications** (open when the window starts), **Text messages (SMS, MMS, chat)**, **Calls**, **Contacts**, **Photos**, **Apps**, **Browser, handoff and settings**
-  - **Overview and checks**: the timeline, calls and texts per person, and the checks
+  - **Overview and checks**: the timeline, calls and texts per person, the checks, and the **relation matrix**
   - **Phones linked to this PC** and **USB and Bluetooth on this PC**
   - **Advanced**: the SQLECmd map output, and the copies with their hashes
   - Inside a topic the data comes first. **Rows that belong together**, **Links to other tables**, **Matched from other files (inferred)** and, under *Phones linked to this PC*, **How these connect** are folded sub-headings; *Advanced* holds **SQLECmd map output** and **Copies and hashes**. A greyed name has no rows.
@@ -162,6 +162,35 @@ Every link carries its basis, colour-coded:
 | Stored link | (in the text) | The ID is written in the data itself |
 | Inferred | orange / labelled | The tool's own join, for example by time or phone number. It is never stored on the device |
 | Checks | red | Rows whose partner is missing, or counts that disagree |
+
+### The relation matrix
+
+Two views under **Overview and checks** summarise every link in the case, counted from the same links the linked-rows pane shows:
+
+- **Relation matrix (table × table)**: a grid. Read a row across to see how many links join that table to each other table (blank = none). `12` is stored links, `3 inferred` is links the tool made across database files, `12 + 3 inferred` is both.
+- **Relation matrix: linked table pairs**: one row per pair of linked tables, with the number of links, how many are stored and how many inferred, which relations made them (with a count for each) and an example.
+
+It is also a check on the tool itself: the pair totals add up to the link count in the status bar, and a link is only counted if both of its ends are rows you can open. A key that points at a row which no longer exists (for example a participant whose conversation is gone) is not a link; it is listed under *Check: rows whose partner is missing*. Inferred links are counted in the matrix even when **Show inferred matches** is off, and the Scope column says so.
+
+![Relation matrix](docs/images/11-relation-matrix.png)
+
+### One damaged database does not hide the others
+
+A database file that SQLite cannot read (damaged, truncated, not a database) is set aside: the other databases load, the status bar warns, and **Copies and hashes** names the file in its `readable` column with the reason. Its copy and hashes are kept. The check opens each copy in SQLite's immutable mode, so it changes nothing. Only when *no* database in the folder is readable is the folder refused.
+
+### The command-line parser (`plparse.py`)
+
+The same engine without a window, for reports and scripting:
+
+```bash
+python viewer/plparse.py --input "<package, Indexed, device or database folder>" --out <folder> --case "Exhibit 1" --carve
+```
+
+For each device folder it writes `report.html`, one CSV per subject (`calls.csv`, `messages.csv`, `contacts.csv`, `photos.csv`, `apps.csv`, `notifications.csv`, `timeline.csv`, …), `carved_records.csv` with `--carve`, `acquisition.json` (every input with its SHA-256, the copies' hashes, warnings and counts) and `query_errors.csv`. Package-wide files (the shared `FullTrust\phone_apps.db`, `DeviceMetadataStorage.json`) are reported once under `_package`.
+
+- **CSV cells cannot run as formulas.** Names, numbers and message text come from the phone, so a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'` (unless it is exactly a number such as `-5` or `+15550100`), the same rule as the viewer's export.
+- **Absent is not failed.** Databases that are simply not in the folder are named once ("not in this folder"); *N read(s) FAILED* is kept for reads that really failed.
+- The HTML report escapes everything it shows and loads nothing from the network.
 
 ### Linked phones (this PC)
 

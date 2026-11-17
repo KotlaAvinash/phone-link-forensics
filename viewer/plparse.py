@@ -586,8 +586,7 @@ def q(path, sql, params=()):
     """Query helper: missing table or file yields [] AND records why. Rows are dicts in which a column this copy
     lacks reads as None and is recorded in MISSING_COLUMNS; an ORDER BY on such a column is dropped, not fatal."""
     if not path:
-        QUERY_ERRORS.append({"file": "(none)", "sql": sql.strip()[:120], "error": "no path given"})
-        return []
+        return []          # that database is not in this folder: stated once per device, not a failed read
     if not os.path.isfile(path):
         QUERY_ERRORS.append({"file": os.path.basename(path), "sql": sql.strip()[:120],
                              "error": "file not present"})
@@ -940,6 +939,18 @@ def clean(v):
     return v
 
 
+_PLAIN_NUMBER = re.compile(r"-?[0-9]+(\.[0-9]+)?|\+[0-9]+")
+
+
+def csv_safe(v):
+    """A CSV cell a spreadsheet will show as text, never run as a formula. Names, numbers and message text come
+    from the phone, so a cell starting with = + - @ (or a tab / carriage return) gets a leading apostrophe - unless
+    it is exactly a number such as -5, 3.14 or +15550100. The same rule as the viewer's export."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") and not _PLAIN_NUMBER.fullmatch(v):
+        return "'" + v
+    return v
+
+
 def write_csv(path, rows, cols=None):
     if not rows:
         with open(path, "w", newline="", encoding="utf-8-sig") as fh:
@@ -959,7 +970,7 @@ def write_csv(path, rows, cols=None):
         w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            w.writerow({k: clean(v) for k, v in r.items()})
+            w.writerow({k: csv_safe(clean(v)) for k, v in r.items()})
     return len(rows)
 
 
@@ -1184,6 +1195,9 @@ def run(a, pkg_work):
     if meta_error:
         pkg_warnings.append(meta_error)
 
+    if os.path.exists(a.out) and not os.path.isdir(a.out):
+        print("--out %s exists and is not a folder. Give a folder name (it is created if missing)." % a.out)
+        return 2
     os.makedirs(a.out, exist_ok=True)
     print("%s %s" % (TOOL, VERSION))
     print("Found %d device folder(s). FullTrust db: %s. Metadata: %s\n"
@@ -1259,6 +1273,11 @@ def run(a, pkg_work):
 
             if d.get("_ft_scope_warning"):
                 warnings.append(d["_ft_scope_warning"])
+            not_here = [n for n in DB_NAMES if n not in dbs]
+            if not_here:
+                warnings.append("%d Phone Link database(s) are not in this folder, so their sections are empty: %s. "
+                                "That is normal for a partial collection or a phone whose data Phone Link removed."
+                                % (len(not_here), ", ".join(not_here)))
             if QUERY_ERRORS:
                 warnings.append("%d query/table read(s) FAILED - an empty section below may mean "
                                 "the read failed, not that the table was empty. See query_errors.csv."

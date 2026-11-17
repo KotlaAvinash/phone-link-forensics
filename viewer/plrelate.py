@@ -165,6 +165,8 @@ class Evidence:
         self._cols = {}
         self.missing = {}       # (db, table) -> columns the viewer asked for that this copy does not have
         self.absent = set()     # (db, table) the viewer asked for that this copy does not have at all
+        self.damaged = {}
+        self.unreadable_paths = {}      # database file name -> staged copy of a file SQLite could not read
         try:
             self.paths = P.stage(self.src, self.work, self.acq)
             for row in self.acq:
@@ -200,6 +202,33 @@ class Evidence:
         if moving:
             self.snapshot_note = ("The source changed while it was being copied: %s. The copy may mix two moments "
                                   "and some recent rows may be missing or inconsistent." % ", ".join(moving))
+        # A file SQLite cannot read (damaged, truncated, not a database) is set aside and named, so one bad file
+        # never hides the databases that are fine. Its copy and hashes stay; it is still carved for records.
+        self.damaged = {}       # database file name -> why SQLite could not read it
+        for db in sorted(self.paths):
+            try:
+                # immutable: SQLite takes no lock and writes nothing (a plain read-only open of a WAL database
+                # still rewrites its -shm, which would change a copy whose hash was just recorded)
+                c = sqlite3.connect(P.ro_uri(self.paths[db]) + "&immutable=1", uri=True)
+                try:
+                    c.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                finally:
+                    c.close()
+            except sqlite3.Error as e:
+                self.damaged[db] = "%s: %s" % (type(e).__name__, e)
+        for db in self.damaged:
+            self.unreadable_paths[db] = self.paths.pop(db)
+        if self.damaged and not self.paths:       # nothing at all is readable: refuse, as before
+            e = sqlite3.DatabaseError("none of the %d database file(s) could be read: %s" % (
+                len(self.damaged), "; ".join("%s (%s)" % kv for kv in sorted(self.damaged.items()))))
+            left = remove_copy(self.work)
+            if left:
+                e.left_behind = left
+            raise e
+        if self.damaged:
+            self.snapshot_note = (self.snapshot_note + "  " if self.snapshot_note else "") + (
+                "%d database file(s) could not be read by SQLite and are shown as absent: %s."
+                % (len(self.damaged), "; ".join("%s (%s)" % kv for kv in sorted(self.damaged.items()))))
 
     def con(self, db):
         if db not in self.paths:
@@ -259,7 +288,9 @@ class Evidence:
         gone = [(db, t) for db, t in sources if (db, t) in self.absent]
         if gone:
             note += (" - TABLE NOT IN THIS COPY, so its rows cannot be shown: "
-                     + ", ".join(f"{db} {t}" + ("" if db in self.paths else f" ({db} absent)") for db, t in gone))
+                     + ", ".join(f"{db} {t}" + ("" if db in self.paths else
+                                                f" ({db} unreadable - {self.damaged[db]})" if db in self.damaged
+                                                else f" ({db} absent)") for db, t in gone))
         return note
 
     def count(self, db, table):
@@ -686,7 +717,8 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
     sms_threads = {t["ThreadID"] for t in thread_rows}
     rows = []
     for m in sms_rows:
-        g.link("R03", _ent("thread", m["ThreadID"]), m["_e"])
+        if m["ThreadID"] in sms_threads:       # a thread that is gone is an orphan (R23), not a link
+            g.link("R03", _ent("thread", m["ThreadID"]), m["_e"])
         rows.append({"ThreadID": m["ThreadID"], "ThreadFound": "yes" if m["ThreadID"] in sms_threads else "no",
                      "MessageID": m["MessageID"], "TimeUTC": m["TimeUTC"], "Type": m["Type"],
                      "Address": m["Address"]})
@@ -694,7 +726,8 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
         ["ThreadID", "ThreadFound", "MessageID", "TimeUTC", "Type", "Address"], rows)
     rows = []
     for p in part_rows:
-        g.link("R04", _ent("thread", p["ThreadID"]), p["_e"])
+        if p["ThreadID"] in sms_threads:       # a thread that is gone is an orphan (R23), not a link
+            g.link("R04", _ent("thread", p["ThreadID"]), p["_e"])
         rows.append({"ThreadID": p["ThreadID"], "ThreadFound": "yes" if p["ThreadID"] in sms_threads else "no",
                      "ParticipantID": p["ParticipantID"], "Address": p["Address"],
                      "ContactName": p["ContactName"]})
@@ -1062,10 +1095,125 @@ def build(ev, window_min=DEFAULT_WINDOW_MIN, map_dirs=None):
             v.kind = "check"
 
     # ---------- provenance + map output
-    add(View("P_copies", "Copies and hashes", "provenance", f"staged from {ev.src} to {ev.work}",
-             ["file", "source_sha256", "copy_sha256", "copy_matches", "source_stable"], ev.verify))
+    for row in ev.verify:        # readable = could SQLite open the copy; a damaged file is named, not hidden
+        base = row["file"].rsplit("-", 1)[0] if row["file"].endswith(("-wal", "-shm")) else row["file"]
+        row["readable"] = ev.damaged.get(base, "yes") if row["file"] == base else ""
+    add(View("P_copies", "Copies and hashes", "provenance",
+             f"staged from {ev.src} to {ev.work}" + (
+                 " - UNREADABLE by SQLite, shown as absent everywhere else: " + ", ".join(sorted(ev.damaged))
+                 if ev.damaged else ""),
+             ["file", "source_sha256", "copy_sha256", "copy_matches", "source_stable", "readable"], ev.verify))
     for vid, view in run_maps(ev, map_dirs or DEFAULT_MAP_DIRS).items():
         add(view)
+    g.dropped_links = drop_dangling(g)
+    add_matrix(g)
+    return g
+
+
+def drop_dangling(g):
+    """Remove links whose other end is not a row of any view (for example a key that points at a thread which no
+    longer exists). Such a row is an orphan - the checks list it - and a link must lead to a row that can be
+    opened. Returns how many links were dropped."""
+    dropped = 0
+    for a in list(g.edges):
+        if a not in g.home:
+            dropped += len(g.edges[a])
+            del g.edges[a]
+            continue
+        keep = [e for e in g.edges[a] if e[1] in g.home]
+        dropped += len(g.edges[a]) - len(keep)
+        if keep:
+            g.edges[a] = keep
+        else:
+            del g.edges[a]
+    g._edge_set = {(a, rid, b, note) for a, es in g.edges.items() for rid, b, note in es}
+    return dropped // 2
+
+
+# ---------------------------------------------------------------- relation matrix
+NO_VIEW = "(rows with no view of their own)"
+
+
+def matrix_name(g, entity, name_of=None):
+    """The table (view) an entity's row is shown in: name_of(view) when given (the viewer passes its Contents
+    names), else the view's title without its code."""
+    home = g.home.get(entity)
+    if not home:
+        return NO_VIEW
+    if name_of:
+        return name_of(g.views[home[0]])
+    return re.sub(r"^[A-Z]{1,3}\d+\s+", "", g.views[home[0]].title) or home[0]
+
+
+def add_matrix(g, name_of=None):
+    """Two views that summarise every link in the graph: which tables are linked to which, how many links, by
+    which relations, and whether the links are stored or inferred. Counted from g.edges - the same links the
+    linked-rows pane shows - so the totals can be checked against it. Call again after more links are added
+    (the viewer adds the linked-phone and USB / Bluetooth sections later); the two views are replaced."""
+    def db_of(entity):
+        home = g.home.get(entity)
+        return g.views[home[0]].db if home else None
+
+    pairs, seen = {}, set()
+    for a, edges in g.edges.items():
+        for rid, b, note in edges:
+            key = (rid, note) + tuple(sorted((repr(a), repr(b))))     # each link is stored in both directions
+            if key in seen:
+                continue
+            seen.add(key)
+            na, nb = sorted((matrix_name(g, a, name_of), matrix_name(g, b, name_of)))
+            p = pairs.setdefault((na, nb), {"stored": 0, "inferred": 0, "rids": {}, "example": ""})
+            inferred = a in g.home and b in g.home and db_of(a) != db_of(b)     # the viewer's rule for "inferred"
+            p["inferred" if inferred else "stored"] += 1
+            p["rids"][rid] = p["rids"].get(rid, 0) + 1
+            if not p["example"]:
+                p["example"] = "%s  <->  %s" % (g.label.get(a, a), g.label.get(b, b))
+
+    def rel_title(rid):
+        v = g.views.get(rid)
+        if v and name_of:
+            return "%s %s" % (rid, name_of(v))
+        return "%s %s" % (rid, re.sub(r"^[A-Z]{1,3}\d+\s+", "", v.title)) if v else rid
+
+    rows = []
+    for (na, nb), p in sorted(pairs.items(), key=lambda kv: (-(kv[1]["stored"] + kv[1]["inferred"]), kv[0])):
+        scope = ("same table" if na == nb else
+                 "other database (inferred)" if p["inferred"] and not p["stored"] else
+                 "stored and inferred" if p["inferred"] else "stored link")
+        rows.append({"From": na, "To": nb, "Links": p["stored"] + p["inferred"], "StoredLinks": p["stored"],
+                     "InferredLinks": p["inferred"], "Scope": scope,
+                     "Relations": ", ".join(rel_title(r) for r in sorted(p["rids"])),
+                     "LinksPerRelation": ", ".join("%s: %d" % (r, n) for r, n in sorted(p["rids"].items())),
+                     "Example": p["example"]})
+    total = sum(r["Links"] for r in rows)
+    basis = ("every link in this case counted once, grouped by the two tables it joins - %d link(s) between %d pair(s) "
+             "of tables. Stored = both rows are in the same database file (an ID written in the data); inferred = the "
+             "rows are in different database files, so the tool made the match (number, package name or time). "
+             "Inferred links are counted here even when 'Show inferred matches' is off" % (total, len(rows)))
+    g.add_view(View("RM2", "RM2  Relation matrix: linked table pairs", "matrix", basis,
+                    ["From", "To", "Links", "StoredLinks", "InferredLinks", "Scope", "Relations", "LinksPerRelation",
+                     "Example"], rows))
+
+    names = sorted({n for r in rows for n in (r["From"], r["To"])})
+    cell = {}
+    for r in rows:
+        text = (str(r["StoredLinks"]) if r["StoredLinks"] else "")
+        if r["InferredLinks"]:
+            text = (text + " + " if text else "") + "%d inferred" % r["InferredLinks"]
+        cell[(r["From"], r["To"])] = cell[(r["To"], r["From"])] = text
+    grid = []
+    for a in names:
+        row = {"Table": a}
+        for b in names:
+            row[b] = cell.get((a, b), "")
+        row["AllLinks"] = sum(r["Links"] for r in rows if a in (r["From"], r["To"]))
+        grid.append(row)
+    g.add_view(View("RM1", "RM1  Relation matrix (table x table)", "matrix",
+                    "read a row across: the number of links between that table and the table named in each column "
+                    "(blank = none; the grid is symmetric; the diagonal is links between rows of the same table). "
+                    "'N inferred' = links the tool made across database files. AllLinks = every link that touches "
+                    "the table. Details of each cell: the 'linked table pairs' view.",
+                    ["Table"] + names + ["AllLinks"], grid))
     return g
 
 

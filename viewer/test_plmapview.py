@@ -419,10 +419,34 @@ class WindowFixesTest(unittest.TestCase):
 
     # ---- 6 failed device switch
     def bad_device(self, name="bad"):
+        """A device none of whose databases SQLite can read, so loading it fails. (One damaged database alone
+        no longer fails a load - the others are still shown; see the test after the switch tests.)"""
         bad = pldemo.build(os.path.join(self.tmp.name, name))
-        with open(os.path.join(bad, "calling.db"), "wb") as f:
-            f.write(b"this is not a database" * 100)
+        for fn in os.listdir(bad):
+            if fn.endswith((".db-wal", ".db-shm")):
+                os.remove(os.path.join(bad, fn))
+        for fn in os.listdir(bad):
+            if fn.endswith(".db"):
+                with open(os.path.join(bad, fn), "wb") as f:
+                    f.write(b"this is not a database" * 100)
         return bad
+
+    def test_device_with_one_damaged_database_still_loads(self):
+        part = pldemo.build(os.path.join(self.tmp.name, "part"))
+        with open(os.path.join(part, "calling.db"), "wb") as f:
+            f.write(b"this is not a database" * 100)
+        for ext in ("-wal", "-shm"):
+            if os.path.exists(os.path.join(part, "calling.db" + ext)):
+                os.remove(os.path.join(part, "calling.db" + ext))
+        app = self.make([("good", self.src), ("part", part)])
+        with mock.patch.object(V.messagebox, "showerror") as err:
+            app.load_device(1)
+        self.assertEqual(err.call_count, 0)
+        self.assertEqual(app.dev_combo.current(), 1)
+        self.assertIn("calling.db", app.ev.unreadable_paths)
+        self.assertIn("could not be read by SQLite", app.ev.snapshot_note)
+        app.show("N_notifications")              # the other databases are still shown
+        self.assertTrue(app.table.get_children())
 
     def test_failed_device_switch_keeps_the_previous_device(self):
         app = self.make([("good", self.src), ("bad", self.bad_device())])
@@ -2800,6 +2824,64 @@ class ViewerReview3Test(unittest.TestCase):
         finally:
             V.R.LEFT_BEHIND.remove(other)
             V.R.remove_copy(old)
+
+
+class RelationMatrixViewTest(unittest.TestCase):
+    """The relation matrix in the window: Contents names, totals equal to the links the window counts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.apps = []
+
+    def tearDown(self):
+        for a in self.apps:
+            try:
+                a.on_close(warn=False)
+            except Exception:
+                pass
+        self.tmp.cleanup()
+
+    def make(self, devices, **kw):
+        app = V.Viewer(devices, **kw)
+        app.withdraw()
+        app.update()
+        self.apps.append(app)
+        return app
+
+    def app_on_demo(self):
+        root = pldemo.build_package(os.path.join(self.tmp.name, "pkg"))
+        devices = V.P.find_device_dirs(root)
+        devices.sort(key=lambda d: -len([f for f in os.listdir(d[1]) if f.endswith(".db")]))
+        return self.make(devices, localcache=V.D.find_localcache(root), connections=V.C.demo_source(), redact=True)
+
+    def test_matrix_totals_equal_the_links_in_the_status_bar(self):
+        app = self.app_on_demo()
+        links = sum(len(x) for x in app.g.edges.values()) // 2
+        self.assertIn(f"{links:,} links", app.status.cget("text"))
+        self.assertEqual(sum(r["Links"] for r in app.g.views["RM2"].rows), links)
+        tables = {r["From"] for r in app.g.views["RM2"].rows} | {r["To"] for r in app.g.views["RM2"].rows}
+        self.assertIn("Phone pairings", tables, "links added after the device build are counted too")
+        self.assertIn("USB devices", tables)
+
+    def test_matrix_uses_the_contents_names_and_sits_under_overview(self):
+        app = self.app_on_demo()
+        names = {V.nav_place(v, app.built_min)[2] for v in app.g.views.values()}
+        for r in app.g.views["RM2"].rows:
+            for end in (r["From"], r["To"]):
+                self.assertTrue(end in names or end == V.R.NO_VIEW, end)
+        self.assertEqual(V.nav_place(app.g.views["RM1"])[0], "overview")
+        self.assertTrue(app.nav.exists("RM1") and app.nav.exists("RM2"), "listed with 'Show inferred matches' off")
+        app.show("RM1")
+        app.update()
+        self.assertEqual(len(app.table.get_children()), len(app.g.views["RM1"].rows))
+        self.assertEqual(app.kind_lbl.cget("text"), V.BADGE.get("matrix", "MATRIX"))
+
+    def test_matrix_is_recounted_after_a_nearby_change(self):
+        app = self.app_on_demo()
+        app.window_min.set("60")
+        app.rebuild()
+        links = sum(len(x) for x in app.g.edges.values()) // 2
+        self.assertEqual(sum(r["Links"] for r in app.g.views["RM2"].rows), links)
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ import tempfile
 
 AA = 4.5
 MODES = ("light", "dark", "system")
-KINDS = ("pc", "conn", "table", "in-table", "in-db", "check", "cross", "map", "provenance")
+KINDS = ("pc", "conn", "table", "in-table", "in-db", "check", "cross", "map", "provenance", "matrix")
 
 PALETTES = {
     "light": {
@@ -75,7 +75,7 @@ PALETTES = {
         "thumb_active": "#55697e", "edge": "#717e8c",
         "warn": "#ffb74d", "status": "#9fb3c8", "tip_bg": "#13233a", "tip_fg": "#ffffff",
         "on_kind": "#ffffff", "deleted": "#ad1457",
-        "kind.pc": "#5d4037", "kind.conn": "#37474f", "kind.table": "#1e3a56", "kind.in-table": "#2e7d32",
+        "kind.pc": "#5d4037", "kind.conn": "#37474f", "kind.table": "#1e3a56", "kind.matrix": "#1e3a56", "kind.in-table": "#2e7d32",
         "kind.in-db": "#00796b", "kind.check": "#c62828", "kind.cross": "#b45309", "kind.map": "#6a1b9a",
         "kind.provenance": "#546e7a",
     },
@@ -88,7 +88,7 @@ PALETTES = {
         "thumb_active": "#8b949e", "edge": "#768390",
         "warn": "#ffb454", "status": "#9aa7b4", "tip_bg": "#30363d", "tip_fg": "#e6edf3",
         "on_kind": "#0d1117", "deleted": "#f778ba",
-        "kind.pc": "#d7a98c", "kind.conn": "#a7b6c2", "kind.table": "#79b8ff", "kind.in-table": "#7ee787",
+        "kind.pc": "#d7a98c", "kind.conn": "#a7b6c2", "kind.table": "#79b8ff", "kind.matrix": "#79b8ff", "kind.in-table": "#7ee787",
         "kind.in-db": "#4dd0c4", "kind.check": "#ff7b72", "kind.cross": "#ffb454", "kind.map": "#d2a8ff",
         "kind.provenance": "#a5b4c0",
     },

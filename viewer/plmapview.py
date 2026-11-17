@@ -56,6 +56,8 @@ KIND = {  # kind -> (heading, light colour (palette role "kind.<kind>"), plain m
               "Joins between DIFFERENT database files - inferences, hidden by default"),
     "map": ("SQLECmd map output", LIGHT["kind.map"], "The maps' queries, run by this viewer on the copy (SQLECmd itself can convert some values differently)"),
     "provenance": ("Provenance", LIGHT["kind.provenance"], "Where the copies came from and their hashes"),
+    "matrix": ("Relation matrix", LIGHT["kind.matrix"],
+               "Which tables are linked to which, counted from the links shown in this window"),
 }
 APP_TITLE = "Phone Link Relations Viewer"
 THEME_LABELS = {"light": "Theme: Light", "dark": "Theme: Dark", "system": "Theme: Follow Windows"}
@@ -144,6 +146,8 @@ NAV = {  # view -> (group, sub-heading or None, name in the list)
     "R18": ("overview", None, "People \u2013 calls and texts per person"),
     "R21": ("overview", None, "Things that happened close together"),
     "R24": ("overview", None, "Unknown numbers and quiet contacts"),
+    "RM1": ("overview", None, "Relation matrix (table × table)"),
+    "RM2": ("overview", None, "Relation matrix: linked table pairs"),
     "R23": ("overview", None, "Check: rows whose partner is missing"),
     "R25": ("overview", None, "Check: sync counters (content_sequence)"),
     "NR4": ("overview", None, "Check: notification columns vs stored data"),
@@ -188,7 +192,7 @@ DB_GROUP = {"notifications.db": "notifications", "phone.db": "messages", "callin
 KIND_SUB = {"in-table": "together", "in-db": "links", "cross": "inferred"}
 BADGE = {"table": "DATA", "in-table": "ROWS THAT BELONG TOGETHER", "in-db": "LINKED TABLES",
          "cross": "INFERRED MATCH", "check": "CHECK", "map": "SQLECMD MAP", "provenance": "HASHES",
-         "pc": "THIS PC", "conn": "THIS PC"}
+         "pc": "THIS PC", "conn": "THIS PC", "matrix": "RELATION MATRIX"}
 
 
 def nav_place(v, window_min=None):
@@ -827,6 +831,7 @@ class Viewer(tk.Tk):
                 if pc and pc is not reuse:
                     self._remember(pc.close())      # the package copy made above would otherwise be leaked
                 raise
+        R.add_matrix(g, lambda v: nav_place(v, self.nearby())[2])      # Contents names; count again: the linked-phone and USB / Bluetooth sections added their own links
         return pc
 
     def _shown(self, path):

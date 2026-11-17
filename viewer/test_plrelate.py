@@ -785,5 +785,107 @@ class OddValues(unittest.TestCase):
         self.assertEqual(g.views["R20"].rows, [])       # the length of the call the photo fell in is unreadable
 
 
+class RelationMatrix(unittest.TestCase):
+    """The matrix is counted from the same links the viewer shows, so it can be checked against them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.ev = R.Evidence(pldemo.build(os.path.join(cls.tmp.name, "device")))
+        cls.g = R.build(cls.ev)
+        cls.pairs = cls.g.views["RM2"]
+        cls.grid = cls.g.views["RM1"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ev.close()
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def per_relation(row):
+        """{relation id: links} from the LinksPerRelation cell ('R03: 3, R04: 4')."""
+        return {x.split(": ")[0]: int(x.split(": ")[1]) for x in row["LinksPerRelation"].split(", ")}
+
+    def links(self):
+        """Every link once, straight from the graph: (table of one end, table of the other, relation id)."""
+        g, seen = self.g, set()
+        for a, edges in g.edges.items():
+            for rid, b, note in edges:
+                key = (rid, note) + tuple(sorted((repr(a), repr(b))))
+                if key not in seen:
+                    seen.add(key)
+                    yield a, b, rid
+
+    def test_pairs_add_up_to_every_link(self):
+        total = sum(1 for _ in self.links())
+        self.assertGreater(total, 50)
+        self.assertEqual(sum(r["Links"] for r in self.pairs.rows), total)
+        self.assertEqual(sum(r["StoredLinks"] + r["InferredLinks"] for r in self.pairs.rows), total)
+        self.assertEqual(total, sum(len(x) for x in self.g.edges.values()) // 2, "the count in the status bar")
+
+    def test_each_pair_matches_an_independent_count(self):
+        name = lambda e: R.matrix_name(self.g, e)
+        want = {}
+        for a, b, rid in self.links():
+            k = tuple(sorted((name(a), name(b))))
+            want.setdefault(k, [0, set()])
+            want[k][0] += 1
+            want[k][1].add(rid)
+        got = {tuple(sorted((r["From"], r["To"]))): (r["Links"], self.per_relation(r)) for r in self.pairs.rows}
+        self.assertEqual(set(got), set(want))
+        for k, (n, rids) in want.items():
+            self.assertEqual(got[k][0], n, k)
+            self.assertEqual(set(got[k][1]), rids, k)
+            self.assertEqual(sum(got[k][1].values()), n, k)
+
+    def test_inferred_means_two_different_database_files(self):
+        """The viewer's own rule: a link between rows of different database files is an inference."""
+        g = self.g
+        inferred = sum(1 for a, b, _ in self.links()
+                       if a in g.home and b in g.home and g.views[g.home[a][0]].db != g.views[g.home[b][0]].db)
+        self.assertGreater(inferred, 0)
+        self.assertEqual(sum(r["InferredLinks"] for r in self.pairs.rows), inferred)
+        for r in self.pairs.rows:
+            self.assertEqual(r["Scope"] == "other database (inferred)", r["InferredLinks"] > 0 and r["StoredLinks"] == 0, r)
+
+    def test_grid_is_square_symmetric_and_agrees_with_the_pairs(self):
+        names = [r["Table"] for r in self.grid.rows]
+        self.assertEqual(self.grid.cols, ["Table"] + names + ["AllLinks"])
+        cell = {(r["Table"], c): r[c] for r in self.grid.rows for c in names}
+        for a in names:
+            for b in names:
+                self.assertEqual(cell[(a, b)], cell[(b, a)], (a, b))
+        for r in self.pairs.rows:
+            text = cell[(r["From"], r["To"])]
+            self.assertTrue(text.startswith(str(r["StoredLinks"])) if r["StoredLinks"] else "inferred" in text, (r, text))
+        linked = {n for r in self.pairs.rows for n in (r["From"], r["To"])}
+        self.assertEqual(set(names), linked, "only tables that have a link are listed")
+        self.assertEqual(cell[("Calls", "Calls")], "")       # the demo has no call-to-call link
+
+    def test_every_relation_with_links_appears(self):
+        used = {rid for _, _, rid in self.links()}
+        shown = {rid for r in self.pairs.rows for rid in self.per_relation(r)}
+        self.assertEqual(shown, used)
+        for r in self.pairs.rows:                 # every id is also named in plain words
+            for rid in self.per_relation(r):
+                self.assertIn(rid + " ", r["Relations"] + " ")
+
+    def test_no_link_ends_at_a_row_that_does_not_exist(self):
+        """Found by the matrix on real data: a participant whose thread is gone was still linked to it. Such a
+        row is an orphan (R23), not a link - a link must lead to a row the examiner can open."""
+        g = self.g
+        self.assertTrue([r for r in g.views["R23"].rows if r["Problem"] == "participant without thread"],
+                        "the demo has an orphan participant to test with")
+        dangling = [(rid, a, b) for a, edges in g.edges.items() for rid, b, _ in edges if b not in g.home]
+        self.assertEqual(dangling, [])
+        self.assertFalse([r for r in self.pairs.rows if R.NO_VIEW in (r["From"], r["To"])])
+
+    def test_rebuilding_replaces_the_matrix(self):
+        before = [dict(r) for r in self.pairs.rows]
+        R.add_matrix(self.g)
+        self.assertEqual([dict(r) for r in self.g.views["RM2"].rows], before)
+        self.assertNotIn("RM1", self.g.relations)
+
+
 if __name__ == "__main__":
     unittest.main()
