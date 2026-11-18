@@ -190,6 +190,7 @@ DB_GROUP = {"notifications.db": "notifications", "phone.db": "messages", "callin
             "contacts.db": "contacts", "photos.db": "photos", "phoneapps.db": "apps",
             "continuity.db": "browser", "settings.db": "browser", "deviceData.db": "browser"}
 KIND_SUB = {"in-table": "together", "in-db": "links", "cross": "inferred"}
+MATRIX_NAME_COLS = ("Table", "From", "To")     # relation-matrix columns that hold table names
 BADGE = {"table": "DATA", "in-table": "ROWS THAT BELONG TOGETHER", "in-db": "LINKED TABLES",
          "cross": "INFERRED MATCH", "check": "CHECK", "map": "SQLECMD MAP", "provenance": "HASHES",
          "pc": "THIS PC", "conn": "THIS PC", "matrix": "RELATION MATRIX"}
@@ -1104,6 +1105,8 @@ class Viewer(tk.Tk):
             width = self.px(260 if c in WIDE else max(80, min(220, 9 * len(c) + 40)))
             if self.col_type(c, vid) == F.DATE:        # the seconds were cut off at about 112 px
                 width = max(width, self.time_col_width())
+            if v.kind == "matrix" and c in MATRIX_NAME_COLS:     # table names: fit the longest, within reason
+                width = max(width, self.name_col_width([r.get(c) for r in v.rows]))
             self.table.column(c, width=width, anchor="w", stretch=False)
         if select_index is not None and self.filter_var.get():
             self._quiet = True
@@ -1265,6 +1268,12 @@ class Viewer(tk.Tk):
     def time_col_width(self):
         """Pixels a time column needs for a whole 'YYYY-MM-DD HH:MM:SS' in the table font, plus the cell padding."""
         return tkfont.nametofont("PL.body", root=self).measure("0000-00-00 00:00:00") + self.px(16)
+
+    def name_col_width(self, values):
+        """Width that shows the longest of these names in full, but never more than 380 px (scaled)."""
+        font = tkfont.nametofont("PL.body", root=self)
+        longest = max([font.measure(str(x)) for x in values if x] or [0])
+        return min(self.px(380), longest + self.px(16))
 
     def _fit_rangebar(self, width):
         """The dates row's last groups (quick range and Clear dates; Keep undated rows, Filter on and the date

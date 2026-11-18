@@ -2863,6 +2863,21 @@ class RelationMatrixViewTest(unittest.TestCase):
         self.assertIn("Phone pairings", tables, "links added after the device build are counted too")
         self.assertIn("USB devices", tables)
 
+    def test_matrix_table_names_are_not_cut_off(self):
+        app = self.app_on_demo()
+        font = V.tkfont.nametofont("PL.body", root=app)
+        for vid, col in (("RM1", "Table"), ("RM2", "From"), ("RM2", "To")):
+            app.show(vid)
+            longest = max(font.measure(r[col]) for r in app.g.views[vid].rows)
+            need = min(app.px(380), longest + app.px(16))
+            self.assertGreaterEqual(int(app.table.column(col, "width")), need, (vid, col))
+
+    def test_matrix_descriptions_have_no_double_full_stop(self):
+        app = self.app_on_demo()
+        for vid in ("RM1", "RM2"):
+            app.show(vid)
+            self.assertNotIn("..", app.basis_lbl.cget("text"), vid)
+
     def test_matrix_uses_the_contents_names_and_sits_under_overview(self):
         app = self.app_on_demo()
         names = {V.nav_place(v, app.built_min)[2] for v in app.g.views.values()}

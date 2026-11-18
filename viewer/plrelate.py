@@ -1212,7 +1212,7 @@ def add_matrix(g, name_of=None):
                     "read a row across: the number of links between that table and the table named in each column "
                     "(blank = none; the grid is symmetric; the diagonal is links between rows of the same table). "
                     "'N inferred' = links the tool made across database files. AllLinks = every link that touches "
-                    "the table. Details of each cell: the 'linked table pairs' view.",
+                    "the table. Details of each cell: the 'linked table pairs' view",
                     ["Table"] + names + ["AllLinks"], grid))
     return g
 

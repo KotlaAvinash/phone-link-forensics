@@ -10,8 +10,8 @@ authors:
 repository-code: "https://github.com/KotlaAvinash/phone-link-forensics"
 url: "https://github.com/KotlaAvinash/phone-link-forensics"
 license: MIT
-version: "2.2.0"
-date-released: "2026-11-17"
+version: "2.2.1"
+date-released: "2026-11-18"
 keywords:
   - digital forensics
   - DFIR

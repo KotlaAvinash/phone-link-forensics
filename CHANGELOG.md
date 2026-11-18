@@ -4,6 +4,13 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-18
+
+### Fixed
+
+- The relation matrix's table-name columns (Table, From, To) are wide enough to show the names in full; they were sized from the heading and cut names short.
+- The table × table view's description no longer ends with a double full stop.
+
 ## [2.2.0] - 2026-11-17
 
 Found by validating the published 2.1.2 from a fresh clone and feeding it damaged and hostile input.
@@ -118,7 +125,8 @@ First release.
 - **Phone connections (this PC):** USB, MTP, Bluetooth and Bluetooth LE devices, AutoPlay, first driver install and connection events from the live registry and logs, read-only.
 - README with synthetic screenshots and a table of where Windows stores phone connection traces; a plain-English Contents list.
 
-[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.2.1...HEAD
+[2.2.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/KotlaAvinash/phone-link-forensics/compare/v2.1.0...v2.1.1
